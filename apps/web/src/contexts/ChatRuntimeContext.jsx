@@ -831,7 +831,6 @@ export function ChatRuntimeProvider({ children }) {
                         ...current,
                         hasLocalConnection: false
                     }));
-                    await refreshChatMessages(chatType, chatId);
                 }
             });
 

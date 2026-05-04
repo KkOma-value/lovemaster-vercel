@@ -269,24 +269,32 @@ def create_chat_stream(
     run_id = run["id"]
     if chat_type == "coach":
         probability = None
-        chunks = list(agent_orchestrator.coach_stream(message, image_url=image_url))
-        answer = "".join(chunks)
+        chunk_iter = agent_orchestrator.coach_stream(message, image_url=image_url)
     else:
         probability = agent_orchestrator.probability(message, image_url=image_url)
-        chunks = list(agent_orchestrator.love_stream(message, image_url=image_url))
-        answer = "".join(chunks)
+        chunk_iter = agent_orchestrator.love_stream(message, image_url=image_url)
+    return StreamingResponse(
+        stream_agent_chat(
+            chat_type=chat_type,
+            chat_id=effective_chat_id,
+            run_id=run_id,
+            chunks=chunk_iter,
+            probability=probability,
+            on_complete=lambda answer: _persist_answer(effective_chat_id, run_id, answer, probability),
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _persist_answer(chat_id: str, run_id: str, answer: str, probability: dict | None) -> None:
     repository.add_message(
-        effective_chat_id,
+        chat_id,
         "assistant",
         answer,
         probability_json=json.dumps(probability, ensure_ascii=False) if probability else None,
     )
     repository.complete_run(run_id, answer)
-    return StreamingResponse(
-        stream_agent_chat(chat_type=chat_type, chat_id=effective_chat_id, run_id=run_id, chunks=chunks, probability=probability),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
 
 
 @app.post("/api/ai/rewrite")
