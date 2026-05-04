@@ -9,6 +9,9 @@ debug.png
 .env
 .env.local
 .env.*.local
+.env.vercel
 __pycache__/
 .pytest_cache/
 *.pyc
+
+.vercel

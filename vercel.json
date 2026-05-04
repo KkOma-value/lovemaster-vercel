@@ -1,26 +1,14 @@
 {
   "buildCommand": "npm --prefix apps/web install && npm --prefix apps/web run build",
   "outputDirectory": "apps/web/dist",
-  "installCommand": "pip install -r requirements.txt",
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/api/index.py"
+      "destination": "https://lovemaster-vercel-backend.vercel.app/api/$1"
     },
     {
       "source": "/(.*)",
       "destination": "/index.html"
-    }
-  ],
-  "functions": {
-    "api/index.py": {
-      "maxDuration": 300
-    }
-  },
-  "crons": [
-    {
-      "path": "/api/cron/knowledge",
-      "schedule": "0 */6 * * *"
     }
   ]
 }
