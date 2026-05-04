@@ -1,0 +1,12 @@
+{
+  "name": "lovemaster-vercel",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev:web": "npm --prefix apps/web run dev",
+    "build": "npm --prefix apps/web run build",
+    "test:web": "npm --prefix apps/web run test",
+    "test:api": "python -m pytest apps/api/tests -q",
+    "lint:web": "npm --prefix apps/web run lint"
+  }
+}

@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.vercel/
+.claude/
+output/
+.playwright-mcp/
+eslint-report.txt
+debug.png
+.env
+.env.local
+.env.*.local
+__pycache__/
+.pytest_cache/
+*.pyc

@@ -1,0 +1,7 @@
+<svg viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <path d="M40 70 Q20 50 25 25 Q30 10 45 15 Q60 20 55 45 Q50 65 40 70Z" fill="#C9A87C" opacity="0.5"/>
+  <path d="M40 70 Q38 45 42 20" stroke="#A0624A" stroke-width="1.2" fill="none" opacity="0.4"/>
+  <path d="M55 20 Q25 50 40 70" stroke="#DCA080" fill="none" stroke-width="5" stroke-linecap="round" opacity="0.35"/>
+  <path d="M15 45 Q20 30 35 35 Q25 50 15 45Z" fill="#DCA080" opacity="0.45"/>
+  <path d="M60 55 Q70 45 65 35 Q55 40 60 55Z" fill="#C9A87C" opacity="0.4"/>
+</svg>

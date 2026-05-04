@@ -1,0 +1,260 @@
+@import "tailwindcss";
+
+/* ============================================================
+   Lovemaster — Warm Peach + Cream + Sage Design System
+   ============================================================ */
+
+:root {
+  --bg-cream:     #FBF4EC;
+  --bg-peach:     #FCE7D5;
+  --bg-sand:      #F5E4D1;
+  --bg-card:      #FFFCF7;
+  --bg-sidebar:   #F7EBDD;
+
+  --primary:      #E89B7A;
+  --primary-dark: #C47B5A;
+  --primary-soft: #F5C4A8;
+  --rose:         #E8A4A4;
+  --sage:         #8FB09F;
+  --sage-soft:    #D5E3DA;
+
+  --text-ink:     #3A2419;
+  --text-body:    #6B4A38;
+  --text-muted:   #A98872;
+  --text-faint:   #C9AE97;
+
+  --border-soft:  rgba(232, 155, 122, 0.18);
+  --border-line:  rgba(107, 74, 56, 0.08);
+
+  --shadow-card:  0 2px 12px rgba(196, 123, 90, 0.06), 0 12px 36px rgba(196, 123, 90, 0.08);
+  --shadow-soft:  0 4px 16px rgba(196, 123, 90, 0.08);
+  --shadow-lift:  0 18px 48px rgba(196, 123, 90, 0.18);
+  --shadow-inner: inset 0 1px 0 rgba(255,255,255,0.9);
+
+  --r-sm: 14px;
+  --r-md: 20px;
+  --r-lg: 28px;
+  --r-xl: 36px;
+
+  --font-display: 'ZCOOL KuaiLe', 'Ma Shan Zheng', system-ui, sans-serif;
+  --font-body:    'ZCOOL KuaiLe', 'Ma Shan Zheng', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-en:      'Inter', system-ui, sans-serif;
+
+  /* Legacy aliases so older module.css still render without breaking */
+  --color-primary:        var(--primary);
+  --color-primary-light:  var(--primary-soft);
+  --color-primary-dark:   var(--primary-dark);
+  --bg-surface:           var(--bg-card);
+  --bg-primary:           var(--bg-cream);
+  --bg-input:             #FFFDF9;
+  --bg-muted:             var(--bg-peach);
+  --text-primary:         var(--text-ink);
+  --text-secondary:       var(--text-body);
+  --border-subtle:        var(--border-soft);
+  --border-medium:        rgba(196, 123, 90, 0.3);
+  --gradient-warm:        #E89B7A;
+  --gradient-button:      var(--gradient-warm);
+  --shadow-sm:            var(--shadow-soft);
+  --shadow-md:            var(--shadow-card);
+  --shadow-warm:          0 8px 24px rgba(232, 155, 122, 0.3);
+  --shadow-card-legacy:   var(--shadow-card);
+  --radius-sm:            var(--r-sm);
+  --radius-md:            var(--r-md);
+  --radius-lg:            var(--r-lg);
+  --radius-full:          9999px;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #root { margin: 0; padding: 0; height: 100%; width: 100%; }
+
+body {
+  font-family: var(--font-body);
+  color: var(--text-ink);
+  background: var(--bg-cream);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: auto;
+  line-height: 1.7;
+  letter-spacing: 0.02em;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+}
+
+/* ── Grain overlay ── */
+.grain::after {
+  content: '';
+  position: absolute; inset: 0;
+  pointer-events: none;
+  opacity: 0.35;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.4 0 0 0 0 0.25 0 0 0 0 0.15 0 0 0 0.08 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+
+/* ── Warm page background ── */
+.warm-bg {
+  background:
+    radial-gradient(1000px 600px at 15% -10%, #FDEBDC 0%, transparent 60%),
+    radial-gradient(900px 700px at 95% 10%, #FAD8C2 0%, transparent 55%),
+    radial-gradient(800px 900px at 80% 110%, #F9E4DA 0%, transparent 60%);
+}
+
+/* ── Display-type treatment ── */
+.display { font-family: var(--font-display); letter-spacing: 0.02em; }
+.body-font { font-family: var(--font-body); }
+
+/* ── Scrollbars ── */
+.nice-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.nice-scroll::-webkit-scrollbar-thumb { background: rgba(196,123,90,0.25); border-radius: 3px; }
+.nice-scroll::-webkit-scrollbar-thumb:hover { background: rgba(196,123,90,0.4); }
+.nice-scroll::-webkit-scrollbar-track { background: transparent; }
+
+.hide-scroll::-webkit-scrollbar { display: none; }
+.hide-scroll { scrollbar-width: none; }
+
+::-webkit-scrollbar        { width: 6px; height: 6px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: rgba(196,123,90,0.25); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(196,123,90,0.4); }
+
+::selection { background: rgba(232, 155, 122, 0.3); color: var(--text-ink); }
+
+/* ── Animations ── */
+@keyframes floatY { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes popIn { 0% { opacity: 0; transform: scale(0.85); } 60% { transform: scale(1.04); } 100% { opacity: 1; transform: scale(1); } }
+@keyframes heartBeat { 0%,100% { transform: scale(1); } 12%,36% { transform: scale(1.18); } 24% { transform: scale(0.95); } }
+@keyframes dotPulse { 0%,100% { opacity: 0.3; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1.1); } }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+@keyframes breathe { 0%,100% { transform: scale(1); filter: brightness(1); } 50% { transform: scale(1.03); filter: brightness(1.06); } }
+@keyframes shine { 0% { transform: translateX(-120%) skewX(-18deg); } 100% { transform: translateX(220%) skewX(-18deg); } }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulseDot { 0%, 100% { opacity: 0.35; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1.15); } }
+
+.float-slow { animation: floatY 6s ease-in-out infinite; }
+.float-med  { animation: floatY 4.5s ease-in-out infinite; }
+.fade-up    { animation: fadeUp 0.6s cubic-bezier(0.34, 1.4, 0.64, 1) both; }
+.pop-in     { animation: popIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.heart-beat { animation: heartBeat 1.8s ease-in-out infinite; }
+.breathe    { animation: breathe 3.5s ease-in-out infinite; }
+
+.shimmer-text {
+  background: var(--text-muted);
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+}
+
+/* ── Cards ── */
+.soft-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.sticker-shadow {
+  box-shadow:
+    0 1px 0 rgba(255,255,255,0.8) inset,
+    0 -2px 0 rgba(196,123,90,0.08) inset,
+    0 10px 24px rgba(196,123,90,0.14),
+    0 2px 6px rgba(196,123,90,0.08);
+}
+
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--bg-peach);
+  color: var(--primary-dark);
+  font-size: 12px;
+  border: 1px solid rgba(232,155,122,0.22);
+}
+
+/* ── Buttons ── */
+.btn-primary {
+  position: relative;
+  background: #E89B7A;
+  color: #FFFAF5;
+  border: none;
+  border-radius: 999px;
+  padding: 12px 24px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.45),
+    inset 0 -2px 0 rgba(160,98,74,0.35),
+    0 8px 20px rgba(232,155,122,0.4);
+  transition: transform .18s ease, box-shadow .22s ease;
+  overflow: hidden;
+}
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.45),
+    inset 0 -2px 0 rgba(160,98,74,0.35),
+    0 12px 28px rgba(232,155,122,0.55);
+}
+.btn-primary:active { transform: translateY(0); }
+.btn-primary:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+.btn-primary::after {
+  content: ''; position: absolute; inset: 0;
+  background: rgba(255,255,255,0.24);
+  transform: translateX(-120%) skewX(-18deg);
+  pointer-events: none;
+}
+.btn-primary:hover:not(:disabled)::after { animation: shine 0.9s ease forwards; }
+
+.btn-ghost {
+  background: rgba(255,253,249,0.6);
+  border: 1px solid var(--border-soft);
+  color: var(--text-body);
+  border-radius: 999px;
+  padding: 10px 18px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all .2s ease;
+}
+.btn-ghost:hover { background: #FFFDF9; color: var(--primary-dark); border-color: var(--primary-soft); }
+.btn-ghost:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* ── Divider ── */
+.dot-divider {
+  height: 1px;
+  background-color: var(--border-soft);
+}
+
+.bubble-in { animation: popIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+
+/* ── Focus rings ── */
+*:focus { outline: none; }
+*:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 8px; }
+
+/* ── Pattern backgrounds ── */
+.heart-pattern {
+  background-image:
+    radial-gradient(circle at 20% 30%, rgba(232,164,164,0.08) 0%, transparent 2%),
+    radial-gradient(circle at 70% 80%, rgba(232,155,122,0.08) 0%, transparent 2%),
+    radial-gradient(circle at 45% 65%, rgba(143,176,159,0.06) 0%, transparent 2%);
+  background-size: 120px 120px, 160px 160px, 200px 200px;
+}
+
+/* ── Inputs ── */
+input, textarea { font-family: inherit; }
+
+/* ── Reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
