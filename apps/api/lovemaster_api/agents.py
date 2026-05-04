@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 
 from .ai_client import AIClient
 from .knowledge import RagKnowledgeService
 from .multimodal import ocr_service, probability_service
+from .tools import tool_registry
 
+logger = logging.getLogger(__name__)
 
 LOVE_SYSTEM_PROMPT = """
 你是 Lovemaster 的 Love 模式。你提供温柔、自然、低压力的恋爱沟通陪伴。
@@ -20,42 +23,102 @@ COACH_SYSTEM_PROMPT = """
 
 
 class AgentOrchestrator:
-    def __init__(self, ai_client: AIClient | None = None, rag_service: RagKnowledgeService | None = None) -> None:
+    def __init__(
+        self,
+        ai_client: AIClient | None = None,
+        rag_service: RagKnowledgeService | None = None,
+        repository=None,
+    ) -> None:
         self.ai_client = ai_client or AIClient()
         self.rag_service = rag_service or RagKnowledgeService()
+        self._repository = repository
 
-    def love_answer(self, message: str, *, image_url: str | None = None) -> str:
+    def set_repository(self, repository) -> None:
+        self._repository = repository
+
+    def love_answer(self, message: str, *, image_url: str | None = None, chat_id: str | None = None) -> str:
+        history = self._load_history(chat_id)
         ocr = ocr_service.extract(image_url, message)
         rag = self.rag_service.retrieve(build_rag_query(message, ocr))
-        user_prompt = build_love_prompt(message, rag, image_url, ocr)
+        user_prompt = build_love_prompt(message, rag, image_url, ocr, history=history)
         return self.ai_client.complete(system=LOVE_SYSTEM_PROMPT, user=user_prompt)
 
-    def love_stream(self, message: str, *, image_url: str | None = None, probability: dict | None = None) -> Iterable[str]:
-        ocr = ocr_service.extract(image_url, message)
-        rag = self.rag_service.retrieve(build_rag_query(message, ocr))
-        user_prompt = build_love_prompt(message, rag, image_url, ocr, probability)
-        return self.ai_client.stream(system=LOVE_SYSTEM_PROMPT, user=user_prompt)
+    def love_stream(
+        self,
+        message: str,
+        *,
+        image_url: str | None = None,
+        chat_id: str | None = None,
+    ) -> tuple[Iterable[str], dict | None, dict]:
+        """Stream Love mode response. Returns (chunks, probability, ocr_result).
 
-    def coach_answer(self, message: str, *, image_url: str | None = None) -> str:
+        OCR and RAG are computed once and shared. Probability is computed inline
+        only when the user requests it.
+        """
+        history = self._load_history(chat_id)
         ocr = ocr_service.extract(image_url, message)
         rag = self.rag_service.retrieve(build_rag_query(message, ocr))
-        tool_marker = "[TOOLS:YES]\n" if likely_needs_tools(message) else "[TOOLS:NO]\n"
-        user_prompt = tool_marker + build_coach_prompt(message, rag, image_url, ocr)
+
+        probability = None
+        if probability_requested(message):
+            probability = probability_service.analyze(
+                message, rag_context=rag, ocr_text=ocr.get("ocrText", "")
+            )
+
+        user_prompt = build_love_prompt(message, rag, image_url, ocr, probability, history)
+        chunks = self.ai_client.stream(system=LOVE_SYSTEM_PROMPT, user=user_prompt)
+        return chunks, probability, ocr
+
+    def coach_answer(self, message: str, *, image_url: str | None = None, chat_id: str | None = None) -> str:
+        history = self._load_history(chat_id)
+        ocr = ocr_service.extract(image_url, message)
+        rag = self.rag_service.retrieve(build_rag_query(message, ocr))
+        user_prompt = build_coach_prompt(message, rag, image_url, ocr, history)
+        if likely_needs_tools(message):
+            return self.ai_client.complete_with_tools(
+                system=COACH_SYSTEM_PROMPT,
+                user=user_prompt,
+                tools=tool_registry.definitions(),
+                tool_executor=tool_registry.run,
+            )
         return self.ai_client.complete(system=COACH_SYSTEM_PROMPT, user=user_prompt)
 
-    def coach_stream(self, message: str, *, image_url: str | None = None) -> Iterable[str]:
-        ocr = ocr_service.extract(image_url, message)
-        rag = self.rag_service.retrieve(build_rag_query(message, ocr))
-        tool_marker = "[TOOLS:YES]\n" if likely_needs_tools(message) else "[TOOLS:NO]\n"
-        user_prompt = tool_marker + build_coach_prompt(message, rag, image_url, ocr)
-        return self.ai_client.stream(system=COACH_SYSTEM_PROMPT, user=user_prompt)
+    def coach_stream(
+        self,
+        message: str,
+        *,
+        image_url: str | None = None,
+        chat_id: str | None = None,
+    ) -> tuple[Iterable[str], dict]:
+        """Stream Coach mode response. Returns (chunks, ocr_result).
 
-    def probability(self, message: str, *, image_url: str | None = None) -> dict | None:
-        if not probability_requested(message):
-            return None
+        When tools are likely needed, runs the tool-calling loop first
+        and yields the final result as a single chunk.
+        """
+        history = self._load_history(chat_id)
         ocr = ocr_service.extract(image_url, message)
         rag = self.rag_service.retrieve(build_rag_query(message, ocr))
-        return probability_service.analyze(message, rag_context=rag, ocr_text=ocr.get("ocrText", ""))
+        user_prompt = build_coach_prompt(message, rag, image_url, ocr, history)
+        if likely_needs_tools(message):
+            result = self.ai_client.complete_with_tools(
+                system=COACH_SYSTEM_PROMPT,
+                user=user_prompt,
+                tools=tool_registry.definitions(),
+                tool_executor=tool_registry.run,
+                on_tool_call=lambda name, args: logger.info("Tool call: %s(%s)", name, args),
+            )
+            return _single_chunk_iter(result), ocr
+        chunks = self.ai_client.stream(system=COACH_SYSTEM_PROMPT, user=user_prompt)
+        return chunks, ocr
+
+    def _load_history(self, chat_id: str | None, limit: int = 10) -> list[dict]:
+        if not chat_id or not self._repository:
+            return []
+        try:
+            return self._repository.get_messages(chat_id, limit=limit)
+        except Exception:
+            logger.warning("Failed to load chat history for %s", chat_id)
+            return []
 
 
 def likely_needs_tools(message: str) -> bool:
@@ -64,7 +127,39 @@ def likely_needs_tools(message: str) -> bool:
     return any(keyword in lowered for keyword in keywords)
 
 
-def build_love_prompt(message: str, rag: str, image_url: str | None, ocr: dict | None = None, probability: dict | None = None) -> str:
+def _single_chunk_iter(text: str) -> Iterable[str]:
+    yield text
+
+
+def format_history(history: list[dict]) -> str:
+    if not history:
+        return ""
+    lines = []
+    for msg in history:
+        role = "用户" if msg.get("role") == "user" else "助手"
+        content = msg.get("content", "")
+        if len(content) > 300:
+            content = content[:300] + "..."
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+def build_love_prompt(
+    message: str,
+    rag: str,
+    image_url: str | None,
+    ocr: dict | None = None,
+    probability: dict | None = None,
+    history: list[dict] | None = None,
+) -> str:
+    history_section = ""
+    if history:
+        history_text = format_history(history)
+        history_section = f"""
+# 对话历史
+{history_text}
+"""
+
     probability_section = ""
     if probability:
         probability_section = f"""
@@ -77,7 +172,12 @@ def build_love_prompt(message: str, rag: str, image_url: str | None, ocr: dict |
 - 风险信号：{', '.join(flag.get('text', '') for flag in probability.get('redFlags', []))}
 """
 
+    vision_note = ""
+    if ocr and ocr.get("visionFailed"):
+        vision_note = "\n（注意：用户发送了图片但系统无法识别图片内容，请基于文字描述回复）\n"
+
     return f"""
+{history_section}
 # 用户问题
 {message}
 
@@ -87,16 +187,36 @@ def build_love_prompt(message: str, rag: str, image_url: str | None, ocr: dict |
 # OCR/截图摘要
 {(ocr or {}).get("sceneSummary") or "无"}
 {(ocr or {}).get("ocrText") or ""}
-
+{vision_note}
 # 相关知识参考
 {rag or "无"}
 {probability_section}
-请输出自然、亲切、可执行的恋爱沟通建议。如果提供了成功率分析，请在回复中引用并解释这个概率。
+请输出自然、亲切、可执行的恋爱沟通建议。如果对话历史中有之前的交流，请保持连贯性。
+如果提供了成功率分析，请在回复中引用并解释这个概率。
 """
 
 
-def build_coach_prompt(message: str, rag: str, image_url: str | None, ocr: dict | None = None) -> str:
+def build_coach_prompt(
+    message: str,
+    rag: str,
+    image_url: str | None,
+    ocr: dict | None = None,
+    history: list[dict] | None = None,
+) -> str:
+    history_section = ""
+    if history:
+        history_text = format_history(history)
+        history_section = f"""
+# 对话历史
+{history_text}
+"""
+
+    vision_note = ""
+    if ocr and ocr.get("visionFailed"):
+        vision_note = "\n（注意：用户发送了图片但系统无法识别图片内容，请基于文字描述回复）\n"
+
     return f"""
+{history_section}
 # 用户任务
 {message}
 
@@ -106,11 +226,11 @@ def build_coach_prompt(message: str, rag: str, image_url: str | None, ocr: dict 
 # OCR/截图摘要
 {(ocr or {}).get("sceneSummary") or "无"}
 {(ocr or {}).get("ocrText") or ""}
-
+{vision_note}
 # 相关知识参考
 {rag or "无"}
 
-请判断需求，给出下一步行动建议。
+请判断需求，给出下一步行动建议。如果对话历史中有之前的交流，请保持连贯性。
 """
 
 

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
+from pydantic import BaseModel, Field, ValidationError
+
 from .ai_client import AIClient
+
+logger = logging.getLogger(__name__)
 
 
 REWRITE_SYSTEM = """
@@ -17,9 +22,40 @@ OCR_SYSTEM = """
 """
 
 PROBABILITY_SYSTEM = """
-你是 Lovemaster 的 ProbabilityAnalyst。输出 JSON，字段包括 probability, tier, confidence,
-summary, greenFlags, redFlags, nextActions。nextActions 恰好 3 条。
+你是 Lovemaster 的 ProbabilityAnalyst。严格输出以下 JSON 格式：
+{
+  "probability": 15-85 之间的整数,
+  "tier": "极低|偏低|一般|较高|很高",
+  "confidence": "low|medium|high",
+  "summary": "1-2句概要",
+  "greenFlags": [{"text": "信号描述", "evidence": "具体证据", "weight": "low|medium|high"}],
+  "redFlags": [{"text": "风险描述", "evidence": "具体证据", "weight": "low|medium|high"}],
+  "nextActions": [{"text": "可执行的具体行动", "tone": "温和|主动|稳健"}]
+}
+约束：greenFlags 至少 2 条，redFlags 至少 1 条，nextActions 恰好 3 条。
+probability 不能低于 15 或高于 85。使用性别中立的"TA"。
 """
+
+
+class Flag(BaseModel):
+    text: str
+    evidence: str = ""
+    weight: str = "medium"
+
+
+class NextAction(BaseModel):
+    text: str
+    tone: str = "稳健"
+
+
+class ProbabilityOutput(BaseModel):
+    probability: int = Field(ge=15, le=85)
+    tier: str
+    confidence: str = "medium"
+    summary: str
+    greenFlags: list[Flag] = Field(min_length=2)
+    redFlags: list[Flag] = Field(min_length=1)
+    nextActions: list[NextAction] = Field(min_length=3, max_length=3)
 
 
 class RewriteService:
@@ -37,14 +73,42 @@ class OcrService:
         self.ai_client = ai_client or AIClient()
 
     def extract(self, image_url: str | None, user_message: str) -> dict:
+        """Extract OCR text from an image URL using a vision model.
+
+        Returns dict with keys: ocrText, sceneSummary, uncertainties, visionFailed.
+        If vision is not available, returns empty results with visionFailed=True.
+        Does NOT fallback to sending URL as plain text.
+        """
         if not image_url:
-            return {"ocrText": "", "sceneSummary": "", "uncertainties": []}
-        prompt = f"图片 URL：{image_url}\n用户描述：{user_message}\n请抽取 OCR_TEXT 与 SCENE_SUMMARY。"
-        text = self.ai_client.complete(system=OCR_SYSTEM, user=prompt, model=None)
+            return {"ocrText": "", "sceneSummary": "", "uncertainties": [], "visionFailed": False}
+
+        ocr_prompt = (
+            f"用户描述：{user_message}\n"
+            "请仔细观察这张聊天截图，抽取以下信息：\n"
+            "1. OCR_TEXT：截图中所有可见的文字内容（完整保留）\n"
+            "2. SCENE_SUMMARY：简短描述截图的场景和对话氛围"
+        )
+
+        vision_text = self.ai_client.complete_vision(
+            system=OCR_SYSTEM,
+            user=ocr_prompt,
+            image_url=image_url,
+        )
+
+        if vision_text:
+            return {
+                "ocrText": extract_section(vision_text, "OCR_TEXT") or vision_text[:500],
+                "sceneSummary": extract_section(vision_text, "SCENE_SUMMARY") or vision_text[:240],
+                "uncertainties": [],
+                "visionFailed": False,
+            }
+
+        logger.warning("Vision unavailable for image OCR: %s", image_url[:80])
         return {
-            "ocrText": extract_section(text, "OCR_TEXT") or "",
-            "sceneSummary": extract_section(text, "SCENE_SUMMARY") or text[:240],
-            "uncertainties": [],
+            "ocrText": "",
+            "sceneSummary": "",
+            "uncertainties": ["图片识别暂不可用，无法读取截图内容"],
+            "visionFailed": True,
         }
 
 
@@ -57,12 +121,17 @@ class ProbabilityAnalysisService:
 用户问题：{user_message}
 OCR 摘录：{ocr_text or '无'}
 知识参考：{rag_context or '无'}
-请输出概率分析 JSON。
+请严格按照系统提示中的 JSON 格式输出概率分析。
 """
         raw = self.ai_client.complete(system=PROBABILITY_SYSTEM, user=prompt, model=None)
         parsed = parse_json_object(raw)
         if parsed:
-            return normalize_probability(parsed)
+            try:
+                validated = ProbabilityOutput.model_validate(parsed)
+                return validated.model_dump()
+            except ValidationError as exc:
+                logger.warning("Probability validation failed, using normalized fallback: %s", exc)
+                return normalize_probability(parsed)
         return heuristic_probability(user_message, rag_context, ocr_text)
 
 
@@ -92,16 +161,34 @@ def parse_json_object(text: str) -> dict | None:
 
 def normalize_probability(data: dict) -> dict:
     probability = int(data.get("probability") or 50)
-    probability = max(0, min(100, probability))
+    probability = max(15, min(85, probability))
     return {
         "probability": probability,
         "tier": data.get("tier") or tier_for(probability),
         "confidence": data.get("confidence") or "medium",
         "summary": data.get("summary") or "信息还不完整，建议结合更多聊天上下文判断。",
-        "greenFlags": data.get("greenFlags") or [{"text": "存在正向互动信号", "weight": "medium"}],
-        "redFlags": data.get("redFlags") or [{"text": "上下文信息仍有限", "weight": "medium"}],
+        "greenFlags": normalize_flags(data.get("greenFlags"), default_count=2, default_text="存在正向互动信号"),
+        "redFlags": normalize_flags(data.get("redFlags"), default_count=1, default_text="上下文信息仍有限"),
         "nextActions": normalize_next_actions(data.get("nextActions")),
     }
+
+
+def normalize_flags(flags: list | None, *, default_count: int, default_text: str) -> list[dict]:
+    if flags:
+        normalized = []
+        for item in flags[:5]:
+            if isinstance(item, str):
+                normalized.append({"text": item, "evidence": "", "weight": "medium"})
+            else:
+                normalized.append({
+                    "text": item.get("text") or "",
+                    "evidence": item.get("evidence") or "",
+                    "weight": item.get("weight") or "medium",
+                })
+        while len(normalized) < default_count:
+            normalized.append({"text": default_text, "evidence": "", "weight": "medium"})
+        return normalized
+    return [{"text": default_text, "evidence": "", "weight": "medium"} for _ in range(default_count)]
 
 
 def heuristic_probability(user_message: str, rag_context: str, ocr_text: str) -> dict:
@@ -117,27 +204,37 @@ def heuristic_probability(user_message: str, rag_context: str, ocr_text: str) ->
         "tier": tier_for(score),
         "confidence": "medium" if ocr_text else "low",
         "summary": "根据目前信息，这是一个需要继续观察但可以轻量推进的局面。",
-        "greenFlags": [{"text": "对话中存在可继续承接的信号", "weight": "medium"}],
-        "redFlags": [{"text": "仅凭当前描述无法确认 TA 的稳定意愿", "weight": "medium"}],
+        "greenFlags": [
+            {"text": "对话中存在可继续承接的信号", "evidence": "用户描述中包含可延续的话题", "weight": "medium"},
+            {"text": "双方仍有互动意愿", "evidence": "用户主动寻求建议说明仍有期待", "weight": "medium"},
+        ],
+        "redFlags": [
+            {"text": "仅凭当前描述无法确认 TA 的稳定意愿", "evidence": "缺少对方明确的正向反馈", "weight": "medium"},
+        ],
         "nextActions": normalize_next_actions(None),
     }
 
 
+_DEFAULT_ACTIONS = [
+    {"text": "先用一句轻松的话接住当前话题，不急着逼问态度。", "tone": "温和"},
+    {"text": "补一个低压力邀约，让 TA 可以容易地答应或改期。", "tone": "主动"},
+    {"text": "如果回复仍然含糊，放慢节奏观察 TA 是否主动延续。", "tone": "稳健"},
+]
+
+
 def normalize_next_actions(actions) -> list[dict]:
     if not actions:
-        return [
-            {"text": "先用一句轻松的话接住当前话题，不急着逼问态度。", "tone": "温和"},
-            {"text": "补一个低压力邀约，让 TA 可以容易地答应或改期。", "tone": "主动"},
-            {"text": "如果回复仍然含糊，放慢节奏观察 TA 是否主动延续。", "tone": "稳健"},
-        ]
+        return list(_DEFAULT_ACTIONS)
     normalized = []
     for item in actions[:3]:
         if isinstance(item, str):
-            normalized.append({"text": item, "tone": "稳健"})
+            normalized.append({"text": item or "保持轻量推进。", "tone": "稳健"})
         else:
-            normalized.append({"text": item.get("text") or item.get("action") or "", "tone": item.get("tone") or "稳健"})
+            text = item.get("text") or item.get("action") or "保持轻量推进。"
+            normalized.append({"text": text, "tone": item.get("tone") or "稳健"})
     while len(normalized) < 3:
-        normalized.append({"text": "保持轻量推进，观察对方是否主动延续。", "tone": "稳健"})
+        idx = len(normalized)
+        normalized.append(_DEFAULT_ACTIONS[idx])
     return normalized
 
 

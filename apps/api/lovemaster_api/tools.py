@@ -8,6 +8,77 @@ import httpx
 from .settings import settings
 
 
+# OpenAI function-calling format tool definitions
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "搜索互联网获取最新信息，如餐厅推荐、约会攻略、聊天话题等",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_scrape",
+            "description": "抓取指定网页的内容，用于获取文章、攻略等详细信息",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "要抓取的网页 URL"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "image_search",
+            "description": "搜索图片，如约会地点照片、礼物参考图等",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "图片搜索关键词"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_email",
+            "description": "发送邮件，如约会邀请、感谢信等",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "收件人邮箱"},
+                    "subject": {"type": "string", "description": "邮件主题"},
+                    "body": {"type": "string", "description": "邮件正文"},
+                },
+                "required": ["to", "subject", "body"],
+            },
+        },
+    },
+]
+
+# Friendly Chinese names for SSE events
+TOOL_DISPLAY_NAMES = {
+    "web_search": "搜索互联网",
+    "web_scrape": "抓取网页内容",
+    "image_search": "搜索图片",
+    "send_email": "发送邮件",
+}
+
+
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools = {
@@ -15,7 +86,6 @@ class ToolRegistry:
             "web_scrape": web_scrape,
             "image_search": image_search,
             "send_email": send_email,
-            "generate_pdf_text": generate_pdf_text,
         }
 
     def names(self) -> list[str]:
@@ -25,6 +95,13 @@ class ToolRegistry:
         if name not in self._tools:
             raise ValueError(f"Unsupported tool: {name}")
         return self._tools[name](**kwargs)
+
+    def definitions(self) -> list[dict]:
+        """Return OpenAI-format tool definitions."""
+        return TOOL_DEFINITIONS
+
+    def display_name(self, name: str) -> str:
+        return TOOL_DISPLAY_NAMES.get(name, name)
 
 
 def web_search(query: str) -> dict:
@@ -90,11 +167,6 @@ def send_email(to: str, subject: str, body: str) -> dict:
         smtp.login(settings.spring_mail_username, settings.spring_mail_password)
         smtp.send_message(message)
     return {"sent": True}
-
-
-def generate_pdf_text(title: str, content: str) -> dict:
-    # Vercel-safe placeholder: returns markdown/text content instead of writing local files.
-    return {"title": title, "content": f"# {title}\n\n{content}"}
 
 
 tool_registry = ToolRegistry()

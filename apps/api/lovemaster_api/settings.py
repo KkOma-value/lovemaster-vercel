@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     nvidia_model_rewrite: str = "qwen/qwen3.5-122b-a10b"
     nvidia_model_tools: str = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
     nvidia_model_brain: str = "moonshotai/kimi-k2-thinking"
+    nvidia_model_vision: str = "google/google-paligemma"
     dify_api_base_url: str = "https://api.dify.ai/v1"
     dify_dataset_key: str | None = None
     dify_dataset_id: str | None = None

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
 from .settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 SEGMENT_SEPARATOR = "\n---\n"
@@ -39,6 +43,8 @@ class WikiKnowledgeService:
         title_boost: float = 2.0,
         max_chars_per_page: int = 400,
         total_budget_chars: int = 2000,
+        expansion_weight: float = 0.5,
+        max_expansion_hops: int = 1,
     ) -> None:
         self.root = Path(root or settings.app_knowledge_wiki_root)
         if not self.root.is_absolute():
@@ -47,6 +53,8 @@ class WikiKnowledgeService:
         self.title_boost = title_boost
         self.max_chars_per_page = max_chars_per_page
         self.total_budget_chars = total_budget_chars
+        self.expansion_weight = expansion_weight
+        self.max_expansion_hops = max_expansion_hops
 
     def retrieve(self, query: str) -> WikiKnowledgeResult:
         if not query or not query.strip() or not self.root.exists():
@@ -72,7 +80,13 @@ class WikiKnowledgeService:
         if not scores:
             return WikiKnowledgeResult.empty()
 
-        ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        # Wiki-link graph expansion: boost pages linked from top hits
+        link_graph = {pid: p.get("links", []) for pid, p in pages.items()}
+        expanded_scores = dict(scores)
+        for page_id, score in sorted(scores.items(), key=lambda x: x[1], reverse=True)[: self.top_n]:
+            self._expand_links(page_id, score, link_graph, expanded_scores, hop=0)
+
+        ranked = sorted(expanded_scores.items(), key=lambda item: item[1], reverse=True)
         segments = []
         used = 0
         for page_id, score in ranked[: self.top_n]:
@@ -89,6 +103,23 @@ class WikiKnowledgeService:
         top_score = min(1.0, ranked[0][1] / max(1.0, len(query_tokens) * self.title_boost))
         return WikiKnowledgeResult(SEGMENT_SEPARATOR.join(segments), top_score, len(ranked))
 
+    def _expand_links(
+        self,
+        page_id: str,
+        source_score: float,
+        link_graph: dict[str, list[str]],
+        scores: dict[str, float],
+        hop: int,
+    ) -> None:
+        if hop >= self.max_expansion_hops:
+            return
+        for linked_id in link_graph.get(page_id, []):
+            if linked_id not in scores:
+                boost = source_score * self.expansion_weight * (0.5 ** hop)
+                if boost > 0.1:
+                    scores[linked_id] = boost
+                    self._expand_links(linked_id, boost, link_graph, scores, hop + 1)
+
     def _load_pages(self) -> dict[str, dict]:
         pages = {}
         for path in sorted(self.root.rglob("*.md")):
@@ -102,30 +133,47 @@ class WikiKnowledgeService:
                 weights[token] = weights.get(token, 0.0) + 1.0
             for token in title_tokens:
                 weights[token] = weights.get(token, 0.0) + self.title_boost
-            pages[page_id] = {"title": title, "content": body, "token_weights": weights}
+            # Extract wiki-link targets
+            links = extract_wiki_links(body, self.root)
+            pages[page_id] = {"title": title, "content": body, "token_weights": weights, "links": links}
         return pages
 
 
 class DifyKnowledgeClient:
+    def __init__(self, max_retries: int = 3, backoff_base: float = 1.0) -> None:
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
+
     def retrieve(self, query: str) -> str:
         if not query.strip() or not settings.dify_dataset_key or not settings.dify_dataset_id:
             return ""
-        response = httpx.post(
-            f"{settings.dify_api_base_url.rstrip('/')}/datasets/{settings.dify_dataset_id}/retrieve",
-            headers={"Authorization": f"Bearer {settings.dify_dataset_key}", "Content-Type": "application/json"},
-            json={
-                "query": query,
-                "retrieval_model": {
-                    "search_method": "hybrid_search",
-                    "reranking_enable": False,
-                    "top_k": 4,
-                    "score_threshold_enabled": False,
-                },
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        return self.format_response(response.json())
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries):
+            try:
+                response = httpx.post(
+                    f"{settings.dify_api_base_url.rstrip('/')}/datasets/{settings.dify_dataset_id}/retrieve",
+                    headers={"Authorization": f"Bearer {settings.dify_dataset_key}", "Content-Type": "application/json"},
+                    json={
+                        "query": query,
+                        "retrieval_model": {
+                            "search_method": "hybrid_search",
+                            "reranking_enable": False,
+                            "top_k": 4,
+                            "score_threshold_enabled": False,
+                        },
+                    },
+                    timeout=10,
+                )
+                response.raise_for_status()
+                return self.format_response(response.json())
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as exc:
+                last_exc = exc
+                if attempt < self.max_retries - 1:
+                    sleep_time = self.backoff_base * (2 ** attempt)
+                    logger.warning("Dify retrieve attempt %d failed: %s — retrying in %.1fs", attempt + 1, exc, sleep_time)
+                    time.sleep(sleep_time)
+        logger.error("Dify retrieve failed after %d attempts: %s", self.max_retries, last_exc)
+        return ""
 
     @staticmethod
     def format_response(payload: dict | None) -> str:
@@ -219,3 +267,14 @@ def sanitize_knowledge(text: str) -> str:
     for pattern in blocked_patterns:
         sanitized = re.sub(pattern, "[filtered]", sanitized)
     return sanitized
+
+
+def extract_wiki_links(body: str, root: Path) -> list[str]:
+    """Extract [[page_name]] wiki-links from body text and resolve to page IDs."""
+    links = []
+    for match in WIKI_LINK_PATTERN.finditer(body):
+        target = match.group(1).strip()
+        if target:
+            page_id = target.lower().replace(" ", "-")
+            links.append(page_id)
+    return links

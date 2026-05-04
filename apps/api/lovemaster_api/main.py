@@ -18,6 +18,9 @@ from .storage import upload_to_supabase
 from .multimodal import rewrite_service
 from .jobs import run_knowledge_jobs
 
+# Wire repository into agent orchestrator for chat history
+agent_orchestrator.set_repository(repository)
+
 
 app = FastAPI(title="Lovemaster API", version="0.1.0")
 
@@ -268,11 +271,14 @@ def create_chat_stream(
     )
     run_id = run["id"]
     if chat_type == "coach":
+        chunk_iter, ocr = agent_orchestrator.coach_stream(
+            message, image_url=image_url, chat_id=effective_chat_id
+        )
         probability = None
-        chunk_iter = agent_orchestrator.coach_stream(message, image_url=image_url)
     else:
-        probability = agent_orchestrator.probability(message, image_url=image_url)
-        chunk_iter = agent_orchestrator.love_stream(message, image_url=image_url, probability=probability)
+        chunk_iter, probability, ocr = agent_orchestrator.love_stream(
+            message, image_url=image_url, chat_id=effective_chat_id
+        )
     return StreamingResponse(
         stream_agent_chat(
             chat_type=chat_type,
@@ -280,6 +286,7 @@ def create_chat_stream(
             run_id=run_id,
             chunks=chunk_iter,
             probability=probability,
+            ocr=ocr,
             on_complete=lambda answer: _persist_answer(effective_chat_id, run_id, answer, probability),
         ),
         media_type="text/event-stream",
