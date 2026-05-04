@@ -272,7 +272,7 @@ def create_chat_stream(
         chunk_iter = agent_orchestrator.coach_stream(message, image_url=image_url)
     else:
         probability = agent_orchestrator.probability(message, image_url=image_url)
-        chunk_iter = agent_orchestrator.love_stream(message, image_url=image_url)
+        chunk_iter = agent_orchestrator.love_stream(message, image_url=image_url, probability=probability)
     return StreamingResponse(
         stream_agent_chat(
             chat_type=chat_type,

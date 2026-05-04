@@ -30,10 +30,10 @@ class AgentOrchestrator:
         user_prompt = build_love_prompt(message, rag, image_url, ocr)
         return self.ai_client.complete(system=LOVE_SYSTEM_PROMPT, user=user_prompt)
 
-    def love_stream(self, message: str, *, image_url: str | None = None) -> Iterable[str]:
+    def love_stream(self, message: str, *, image_url: str | None = None, probability: dict | None = None) -> Iterable[str]:
         ocr = ocr_service.extract(image_url, message)
         rag = self.rag_service.retrieve(build_rag_query(message, ocr))
-        user_prompt = build_love_prompt(message, rag, image_url, ocr)
+        user_prompt = build_love_prompt(message, rag, image_url, ocr, probability)
         return self.ai_client.stream(system=LOVE_SYSTEM_PROMPT, user=user_prompt)
 
     def coach_answer(self, message: str, *, image_url: str | None = None) -> str:
@@ -64,7 +64,19 @@ def likely_needs_tools(message: str) -> bool:
     return any(keyword in lowered for keyword in keywords)
 
 
-def build_love_prompt(message: str, rag: str, image_url: str | None, ocr: dict | None = None) -> str:
+def build_love_prompt(message: str, rag: str, image_url: str | None, ocr: dict | None = None, probability: dict | None = None) -> str:
+    probability_section = ""
+    if probability:
+        probability_section = f"""
+# 成功率分析
+- 成功率：{probability.get('probability', 50)}%
+- 等级：{probability.get('tier', '一般')}
+- 置信度：{probability.get('confidence', 'medium')}
+- 概要：{probability.get('summary', '')}
+- 正面信号：{', '.join(flag.get('text', '') for flag in probability.get('greenFlags', []))}
+- 风险信号：{', '.join(flag.get('text', '') for flag in probability.get('redFlags', []))}
+"""
+
     return f"""
 # 用户问题
 {message}
@@ -78,8 +90,8 @@ def build_love_prompt(message: str, rag: str, image_url: str | None, ocr: dict |
 
 # 相关知识参考
 {rag or "无"}
-
-请输出自然、亲切、可执行的恋爱沟通建议。
+{probability_section}
+请输出自然、亲切、可执行的恋爱沟通建议。如果提供了成功率分析，请在回复中引用并解释这个概率。
 """
 
 
