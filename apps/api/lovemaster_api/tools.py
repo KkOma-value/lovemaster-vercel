@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
 import smtplib
 from email.message import EmailMessage
+from urllib.parse import urlparse
 
 import httpx
 
@@ -68,6 +70,22 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_operation",
+            "description": "操作 Supabase 存储中的文件（列出、读取、写入）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "read", "write"], "description": "操作类型"},
+                    "path": {"type": "string", "description": "文件路径或目录路径"},
+                    "content": {"type": "string", "description": "写入内容（仅 write 操作需要）"},
+                },
+                "required": ["action", "path"],
+            },
+        },
+    },
 ]
 
 # Friendly Chinese names for SSE events
@@ -76,6 +94,7 @@ TOOL_DISPLAY_NAMES = {
     "web_scrape": "抓取网页内容",
     "image_search": "搜索图片",
     "send_email": "发送邮件",
+    "file_operation": "文件操作",
 }
 
 
@@ -86,6 +105,7 @@ class ToolRegistry:
             "web_scrape": web_scrape,
             "image_search": image_search,
             "send_email": send_email,
+            "file_operation": file_operation,
         }
 
     def names(self) -> list[str]:
@@ -102,6 +122,32 @@ class ToolRegistry:
 
     def display_name(self, name: str) -> str:
         return TOOL_DISPLAY_NAMES.get(name, name)
+
+
+def _validate_url(url: str) -> str | None:
+    """Validate URL for safety. Returns error message if invalid, None if OK."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "无效的 URL"
+    if parsed.scheme not in ("http", "https"):
+        return "仅支持 http 和 https 协议"
+    hostname = parsed.hostname or ""
+    if not hostname:
+        return "缺少主机名"
+    # Block localhost and common internal hostnames
+    if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return "不允许访问本地地址"
+    # Block private/internal IP ranges
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return "不允许访问内部网络地址"
+    except ValueError:
+        # hostname is a domain name, not an IP — check for internal patterns
+        if hostname.endswith(".internal") or hostname.endswith(".local"):
+            return "不允许访问内部域名"
+    return None
 
 
 def web_search(query: str) -> dict:
@@ -124,6 +170,9 @@ def web_search(query: str) -> dict:
 
 
 def web_scrape(url: str) -> dict:
+    error = _validate_url(url)
+    if error:
+        return {"error": error, "url": url}
     response = httpx.get(url, timeout=15, follow_redirects=True)
     response.raise_for_status()
     text = response.text
@@ -167,6 +216,63 @@ def send_email(to: str, subject: str, body: str) -> dict:
         smtp.login(settings.spring_mail_username, settings.spring_mail_password)
         smtp.send_message(message)
     return {"sent": True}
+
+
+def file_operation(action: str, path: str, content: str | None = None) -> dict:
+    """Operate on files in Supabase Storage (list, read, write)."""
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        return {"success": False, "message": "Supabase 未配置"}
+
+    # Path validation: block traversal and restrict to safe prefixes
+    if ".." in path or path.startswith("/"):
+        return {"success": False, "message": "路径不允许包含 '..' 或以 '/' 开头"}
+
+    base_url = settings.supabase_url.rstrip("/")
+    bucket = settings.supabase_storage_bucket
+    headers = {
+        "Authorization": f"Bearer {settings.supabase_service_role_key}",
+        "apikey": settings.supabase_service_role_key,
+    }
+
+    if action == "list":
+        response = httpx.post(
+            f"{base_url}/storage/v1/object/list/{bucket}",
+            headers={**headers, "Content-Type": "application/json"},
+            json={"prefix": path, "limit": 100, "sortBy": {"column": "name", "order": "asc"}},
+            timeout=15,
+        )
+        response.raise_for_status()
+        items = response.json()
+        return {
+            "files": [
+                {"name": item.get("name"), "size": item.get("metadata", {}).get("size"), "type": "folder" if item.get("id") is None else "file"}
+                for item in items
+            ]
+        }
+
+    if action == "read":
+        response = httpx.get(
+            f"{base_url}/storage/v1/object/{bucket}/{path}",
+            headers=headers,
+            timeout=15,
+        )
+        response.raise_for_status()
+        text = response.text[:10000]
+        return {"content": text, "path": path}
+
+    if action == "write":
+        if content is None:
+            return {"success": False, "message": "写入操作需要 content 参数"}
+        response = httpx.post(
+            f"{base_url}/storage/v1/object/{bucket}/{path}",
+            headers={**headers, "Content-Type": "application/octet-stream"},
+            content=content.encode("utf-8"),
+            timeout=15,
+        )
+        response.raise_for_status()
+        return {"success": True, "path": path, "message": "文件已写入"}
+
+    return {"success": False, "message": f"不支持的操作: {action}"}
 
 
 tool_registry = ToolRegistry()

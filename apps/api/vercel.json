@@ -5,6 +5,25 @@
       "use": "@vercel/python"
     }
   ],
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 120
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/knowledge",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/distill",
+      "schedule": "0 */1 * * *"
+    },
+    {
+      "path": "/api/cron/reinforce",
+      "schedule": "0 */6 * * *"
+    }
+  ],
   "routes": [
     {
       "src": "/api/(.*)",

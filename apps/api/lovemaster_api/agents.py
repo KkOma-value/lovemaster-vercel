@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Iterable
+from collections.abc import AsyncIterator
 
+from .advisors import check_taboo, rereading_advisor
 from .ai_client import AIClient
+from .brain_agent import get_brain_agent
 from .knowledge import RagKnowledgeService
 from .multimodal import ocr_service, probability_service
+from .settings import settings
 from .tools import tool_registry
 
 logger = logging.getLogger(__name__)
@@ -36,86 +40,116 @@ class AgentOrchestrator:
     def set_repository(self, repository) -> None:
         self._repository = repository
 
-    def love_answer(self, message: str, *, image_url: str | None = None, chat_id: str | None = None) -> str:
-        history = self._load_history(chat_id)
-        ocr = ocr_service.extract(image_url, message)
-        rag = self.rag_service.retrieve(build_rag_query(message, ocr))
+    async def love_answer(self, message: str, *, image_url: str | None = None, chat_id: str | None = None) -> str:
+        history = await self._load_history(chat_id)
+        ocr = await ocr_service.extract(image_url, message)
+        rag = await self.rag_service.retrieve(build_rag_query(message, ocr))
         user_prompt = build_love_prompt(message, rag, image_url, ocr, history=history)
-        return self.ai_client.complete(system=LOVE_SYSTEM_PROMPT, user=user_prompt)
+        return await self.ai_client.complete(system=LOVE_SYSTEM_PROMPT, user=user_prompt)
 
-    def love_stream(
+    async def love_stream(
         self,
         message: str,
         *,
         image_url: str | None = None,
         chat_id: str | None = None,
-    ) -> tuple[Iterable[str], dict | None, dict]:
+    ) -> tuple[AsyncIterator[str], dict | None, dict]:
         """Stream Love mode response. Returns (chunks, probability, ocr_result).
 
         OCR and RAG are computed once and shared. Probability is computed inline
         only when the user requests it.
         """
-        history = self._load_history(chat_id)
-        ocr = ocr_service.extract(image_url, message)
-        rag = self.rag_service.retrieve(build_rag_query(message, ocr))
+        # Advisor: taboo word check
+        if settings.advisor_taboo_enabled:
+            taboo_reply = check_taboo(message)
+            if taboo_reply:
+                return _single_chunk_iter(taboo_reply), None, {}
+
+        history = await self._load_history(chat_id)
+        ocr = await ocr_service.extract(image_url, message)
+        rag = await self.rag_service.retrieve(build_rag_query(message, ocr))
 
         probability = None
         if probability_requested(message):
-            probability = probability_service.analyze(
+            probability = await probability_service.analyze(
                 message, rag_context=rag, ocr_text=ocr.get("ocrText", "")
             )
 
         user_prompt = build_love_prompt(message, rag, image_url, ocr, probability, history)
-        chunks = self.ai_client.stream(system=LOVE_SYSTEM_PROMPT, user=user_prompt)
+
+        # Advisor: ReReading (Re2) transform
+        if settings.advisor_rereading_enabled:
+            user_prompt = rereading_advisor.transform(user_prompt)
+
+        chunks = await self.ai_client.stream(system=LOVE_SYSTEM_PROMPT, user=user_prompt)
         return chunks, probability, ocr
 
-    def coach_answer(self, message: str, *, image_url: str | None = None, chat_id: str | None = None) -> str:
-        history = self._load_history(chat_id)
-        ocr = ocr_service.extract(image_url, message)
-        rag = self.rag_service.retrieve(build_rag_query(message, ocr))
+    async def coach_answer(self, message: str, *, image_url: str | None = None, chat_id: str | None = None) -> str:
+        history = await self._load_history(chat_id)
+        ocr = await ocr_service.extract(image_url, message)
+        rag = await self.rag_service.retrieve(build_rag_query(message, ocr))
         user_prompt = build_coach_prompt(message, rag, image_url, ocr, history)
         if likely_needs_tools(message):
-            return self.ai_client.complete_with_tools(
+            return await self.ai_client.complete_with_tools(
                 system=COACH_SYSTEM_PROMPT,
                 user=user_prompt,
                 tools=tool_registry.definitions(),
                 tool_executor=tool_registry.run,
             )
-        return self.ai_client.complete(system=COACH_SYSTEM_PROMPT, user=user_prompt)
+        return await self.ai_client.complete(system=COACH_SYSTEM_PROMPT, user=user_prompt)
 
-    def coach_stream(
+    async def coach_stream(
         self,
         message: str,
         *,
         image_url: str | None = None,
         chat_id: str | None = None,
-    ) -> tuple[Iterable[str], dict]:
+    ) -> tuple[AsyncIterator[str], dict]:
         """Stream Coach mode response. Returns (chunks, ocr_result).
 
         When tools are likely needed, runs the tool-calling loop first
         and yields the final result as a single chunk.
         """
-        history = self._load_history(chat_id)
-        ocr = ocr_service.extract(image_url, message)
-        rag = self.rag_service.retrieve(build_rag_query(message, ocr))
+        # Advisor: taboo word check
+        if settings.advisor_taboo_enabled:
+            taboo_reply = check_taboo(message)
+            if taboo_reply:
+                return _single_chunk_iter(taboo_reply), {}
+
+        history = await self._load_history(chat_id)
+        ocr = await ocr_service.extract(image_url, message)
+        rag = await self.rag_service.retrieve(build_rag_query(message, ocr))
         user_prompt = build_coach_prompt(message, rag, image_url, ocr, history)
-        if likely_needs_tools(message):
-            result = self.ai_client.complete_with_tools(
+
+        # Advisor: ReReading (Re2) transform
+        if settings.advisor_rereading_enabled:
+            user_prompt = rereading_advisor.transform(user_prompt)
+
+        # Use BrainAgent for AI-based tool decision (falls back to keyword matching)
+        brain = get_brain_agent()
+        decision = await brain.decide(message, user_prompt, rag)
+
+        if decision.needs_tools:
+            logger.info("BrainAgent decided tools needed: %s", decision.task_prompt[:100])
+            result = await self.ai_client.complete_with_tools(
                 system=COACH_SYSTEM_PROMPT,
                 user=user_prompt,
                 tools=tool_registry.definitions(),
                 tool_executor=tool_registry.run,
                 on_tool_call=lambda name, args: logger.info("Tool call: %s(%s)", name, args),
             )
-            return _single_chunk_iter(result), ocr
-        chunks = self.ai_client.stream(system=COACH_SYSTEM_PROMPT, user=user_prompt)
+            # Synthesize tool results into final answer
+            final = await brain.synthesize(message, user_prompt, rag, result)
+            return _single_chunk_iter(final), ocr
+
+        chunks = await self.ai_client.stream(system=COACH_SYSTEM_PROMPT, user=user_prompt)
         return chunks, ocr
 
-    def _load_history(self, chat_id: str | None, limit: int = 10) -> list[dict]:
+    async def _load_history(self, chat_id: str | None, limit: int = 10) -> list[dict]:
         if not chat_id or not self._repository:
             return []
         try:
-            return self._repository.get_messages(chat_id, limit=limit)
+            return await asyncio.to_thread(self._repository.get_messages, chat_id, limit=limit)
         except Exception:
             logger.warning("Failed to load chat history for %s", chat_id)
             return []
@@ -127,7 +161,7 @@ def likely_needs_tools(message: str) -> bool:
     return any(keyword in lowered for keyword in keywords)
 
 
-def _single_chunk_iter(text: str) -> Iterable[str]:
+async def _single_chunk_iter(text: str) -> AsyncIterator[str]:
     yield text
 
 

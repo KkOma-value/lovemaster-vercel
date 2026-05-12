@@ -308,6 +308,8 @@ class InMemoryRepository:
 
 
 class PostgresRepository(InMemoryRepository):
+    _conn = None  # module-level connection singleton for serverless
+
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
         self._ensure_schema()
@@ -315,7 +317,9 @@ class PostgresRepository(InMemoryRepository):
     def _connect(self):
         import psycopg
 
-        return psycopg.connect(self.database_url)
+        if PostgresRepository._conn is None or PostgresRepository._conn.closed:
+            PostgresRepository._conn = psycopg.connect(self.database_url)
+        return PostgresRepository._conn
 
     def _ensure_schema(self) -> None:
         migration_path = Path(__file__).resolve().parents[1] / "migrations" / "001_initial_schema.sql"
@@ -718,6 +722,21 @@ class PostgresRepository(InMemoryRepository):
             }
             for row in rows
         ]
+
+    def list_recent_completed_runs(self, hours: int = 1) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select id, user_id, chat_id, chat_type, status, request_message, image_url,
+                       last_event_type, latest_status_text, partial_response, error_message
+                from chat_runs
+                where status = 'COMPLETED'
+                  and finished_at > now() - make_interval(hours => %s)
+                order by finished_at desc
+                """,
+                (hours,),
+            ).fetchall()
+        return [self._run_from_row(row) for row in rows]
 
     def _candidate_from_row(self, row) -> dict | None:
         if not row:

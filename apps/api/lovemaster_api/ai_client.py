@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
-from collections.abc import Generator
+from collections.abc import AsyncGenerator
 
 import httpx
 
@@ -11,16 +12,32 @@ from .settings import settings
 
 logger = logging.getLogger(__name__)
 
+_client: httpx.AsyncClient | None = None
+
+
+def get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
+    return _client
+
+
+async def close_client() -> None:
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
+
 
 class AIClient:
-    def complete(self, *, system: str, user: str, model: str | None = None) -> str:
+    async def complete(self, *, system: str, user: str, model: str | None = None) -> str:
         if settings.ai_provider == "fake":
-            return FakeAIClient().complete(system=system, user=user, model=model)
+            return await FakeAIClient().complete(system=system, user=user, model=model)
         if settings.nvidia_api_key:
-            return self._complete_openai_compatible(system=system, user=user, model=model)
-        return FakeAIClient().complete(system=system, user=user, model=model)
+            return await self._complete_openai_compatible(system=system, user=user, model=model)
+        return await FakeAIClient().complete(system=system, user=user, model=model)
 
-    def complete_with_tools(
+    async def complete_with_tools(
         self,
         *,
         system: str,
@@ -40,9 +57,9 @@ class AIClient:
             on_tool_call: optional callback(name, args) for progress reporting
         """
         if not settings.nvidia_api_key:
-            return FakeAIClient().complete(system=system, user=user, model=model)
+            return await FakeAIClient().complete(system=system, user=user, model=model)
         if not tools:
-            return self.complete(system=system, user=user, model=model)
+            return await self.complete(system=system, user=user, model=model)
 
         base_url = settings.nvidia_base_url.rstrip("/")
         selected_model = model or settings.nvidia_model_tools
@@ -52,7 +69,7 @@ class AIClient:
         ]
 
         for round_num in range(max_rounds):
-            response = httpx.post(
+            response = await get_client().post(
                 f"{base_url}/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {settings.nvidia_api_key}",
@@ -90,7 +107,7 @@ class AIClient:
                     on_tool_call(tool_name, tool_args)
 
                 try:
-                    result = tool_executor(tool_name, **tool_args)
+                    result = await asyncio.to_thread(tool_executor, tool_name, **tool_args)
                     result_str = json.dumps(result, ensure_ascii=False)[:4000]
                 except Exception as exc:
                     result_str = json.dumps({"error": str(exc)}, ensure_ascii=False)
@@ -105,7 +122,7 @@ class AIClient:
         last = messages[-1]
         return last.get("content") or "工具调用轮次已达上限，请基于已有信息回复。"
 
-    def complete_vision(self, *, system: str, user: str, image_url: str, model: str | None = None) -> str | None:
+    async def complete_vision(self, *, system: str, user: str, image_url: str, model: str | None = None) -> str | None:
         """Send a multimodal message with image to a vision model.
 
         Returns the model's text response, or None if vision is not available.
@@ -120,7 +137,7 @@ class AIClient:
             return None
         base_url = settings.nvidia_base_url.rstrip("/")
         try:
-            response = httpx.post(
+            response = await get_client().post(
                 f"{base_url}/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {settings.nvidia_api_key}",
@@ -155,19 +172,22 @@ class AIClient:
             logger.error("Vision failed: %s", exc)
             return None
 
-    def stream(self, *, system: str, user: str, model: str | None = None) -> Generator[str, None, None]:
+    async def stream(self, *, system: str, user: str, model: str | None = None) -> AsyncGenerator[str, None]:
         if settings.ai_provider == "fake":
-            yield from FakeAIClient().stream(system=system, user=user, model=model)
+            async for chunk in FakeAIClient().stream(system=system, user=user, model=model):
+                yield chunk
             return
         if settings.nvidia_api_key:
-            yield from self._stream_openai_compatible(system=system, user=user, model=model)
+            async for chunk in self._stream_openai_compatible(system=system, user=user, model=model):
+                yield chunk
             return
-        yield from FakeAIClient().stream(system=system, user=user, model=model)
+        async for chunk in FakeAIClient().stream(system=system, user=user, model=model):
+            yield chunk
 
-    def _complete_openai_compatible(self, *, system: str, user: str, model: str | None) -> str:
+    async def _complete_openai_compatible(self, *, system: str, user: str, model: str | None) -> str:
         base_url = settings.nvidia_base_url.rstrip("/")
         selected_model = model or settings.nvidia_model_brain
-        response = httpx.post(
+        response = await get_client().post(
             f"{base_url}/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {settings.nvidia_api_key}",
@@ -187,10 +207,10 @@ class AIClient:
         payload = response.json()
         return payload["choices"][0]["message"]["content"]
 
-    def _stream_openai_compatible(self, *, system: str, user: str, model: str | None) -> Generator[str, None, None]:
+    async def _stream_openai_compatible(self, *, system: str, user: str, model: str | None) -> AsyncGenerator[str, None]:
         base_url = settings.nvidia_base_url.rstrip("/")
         selected_model = model or settings.nvidia_model_brain
-        with httpx.stream(
+        async with get_client().stream(
             "POST",
             f"{base_url}/v1/chat/completions",
             headers={
@@ -209,7 +229,7 @@ class AIClient:
             timeout=120,
         ) as response:
             response.raise_for_status()
-            for line in response.iter_lines():
+            async for line in response.aiter_lines():
                 if not line or not line.startswith("data: "):
                     continue
                 data_str = line[6:]
@@ -226,19 +246,19 @@ class AIClient:
 
 
 class FakeAIClient:
-    def complete(self, *, system: str, user: str, model: str | None = None) -> str:
+    async def complete(self, *, system: str, user: str, model: str | None = None) -> str:
         if "[TOOLS:YES]" in user:
             return "我会先把需要外部资料的部分拆出来，再给你一份可执行的沟通计划。"
         return "已结合上下文生成建议：" + summarize(user)
 
-    def complete_with_tools(self, *, system: str, user: str, tools=None, tool_executor=None, **kwargs) -> str:
-        return self.complete(system=system, user=user)
+    async def complete_with_tools(self, *, system: str, user: str, tools=None, tool_executor=None, **kwargs) -> str:
+        return await self.complete(system=system, user=user)
 
-    def stream(self, *, system: str, user: str, model: str | None = None) -> Generator[str, None, None]:
-        text = self.complete(system=system, user=user, model=model)
+    async def stream(self, *, system: str, user: str, model: str | None = None) -> AsyncGenerator[str, None]:
+        text = await self.complete(system=system, user=user, model=model)
         for chunk in split_chunks(text, 6):
             yield chunk
-            time.sleep(0.03)
+            await asyncio.sleep(0.03)
 
 
 def split_chunks(text: str, size: int) -> list[str]:

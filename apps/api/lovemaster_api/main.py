@@ -1,4 +1,5 @@
 import json
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import uuid4
@@ -10,19 +11,26 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, EmailStr
 
 from .agents import agent_orchestrator
+from .ai_client import close_client
 from .auth import hash_password, verify_google_credential, verify_password
 from .repository import repository
 from .settings import settings
 from .sse import stream_agent_chat
 from .storage import upload_to_supabase
 from .multimodal import rewrite_service
-from .jobs import run_knowledge_jobs
+from .jobs import distill_conversations, reinforce_knowledge, run_knowledge_jobs
 
 # Wire repository into agent orchestrator for chat history
 agent_orchestrator.set_repository(repository)
 
 
-app = FastAPI(title="Lovemaster API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    await close_client()
+
+
+app = FastAPI(title="Lovemaster API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -234,7 +242,7 @@ async def love_chat_sse(
     imageUrl: str | None = None,
     user_id: Annotated[str, Depends(current_user_id)] = "anonymous",
 ) -> StreamingResponse:
-    return create_chat_stream("loveapp", message, chatId, imageUrl, user_id)
+    return await create_chat_stream("loveapp", message, chatId, imageUrl, user_id)
 
 
 @app.get("/api/ai/manus/chat")
@@ -244,10 +252,10 @@ async def coach_chat_sse(
     imageUrl: str | None = None,
     user_id: Annotated[str, Depends(current_user_id)] = "anonymous",
 ) -> StreamingResponse:
-    return create_chat_stream("coach", message, chatId, imageUrl, user_id)
+    return await create_chat_stream("coach", message, chatId, imageUrl, user_id)
 
 
-def create_chat_stream(
+async def create_chat_stream(
     chat_type: str,
     message: str,
     chat_id: str,
@@ -271,12 +279,12 @@ def create_chat_stream(
     )
     run_id = run["id"]
     if chat_type == "coach":
-        chunk_iter, ocr = agent_orchestrator.coach_stream(
+        chunk_iter, ocr = await agent_orchestrator.coach_stream(
             message, image_url=image_url, chat_id=effective_chat_id
         )
         probability = None
     else:
-        chunk_iter, probability, ocr = agent_orchestrator.love_stream(
+        chunk_iter, probability, ocr = await agent_orchestrator.love_stream(
             message, image_url=image_url, chat_id=effective_chat_id
         )
     return StreamingResponse(
@@ -305,8 +313,8 @@ def _persist_answer(chat_id: str, run_id: str, answer: str, probability: dict | 
 
 
 @app.post("/api/ai/rewrite")
-def rewrite(payload: RewriteRequest) -> dict:
-    return rewrite_service.optimize(payload.userMessage, payload.imageUrl, payload.mode or "love")
+async def rewrite(payload: RewriteRequest) -> dict:
+    return await rewrite_service.optimize(payload.userMessage, payload.imageUrl, payload.mode or "love")
 
 
 @app.post("/api/ai/knowledge/candidates")
@@ -356,13 +364,31 @@ def strategy_scores(topicKey: str | None = None, limit: int = 20) -> list:
     return repository.list_strategy_scores(topicKey, limit)
 
 
+def _verify_cron_auth(request: Request) -> None:
+    if not settings.cron_secret:
+        raise HTTPException(status_code=403, detail="Cron secret not configured")
+    auth_header = request.headers.get("authorization", "")
+    expected = f"Bearer {settings.cron_secret}"
+    if auth_header != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 @app.get("/api/cron/knowledge")
 def knowledge_cron(request: Request) -> dict:
-    auth_header = request.headers.get("authorization", "")
-    expected = f"Bearer {settings.cron_secret}" if settings.cron_secret else None
-    if expected and auth_header != expected:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _verify_cron_auth(request)
     return run_knowledge_jobs(repository)
+
+
+@app.get("/api/cron/distill")
+def distill_cron(request: Request) -> dict:
+    _verify_cron_auth(request)
+    return {"distilled": distill_conversations(repository)}
+
+
+@app.get("/api/cron/reinforce")
+def reinforce_cron(request: Request) -> dict:
+    _verify_cron_auth(request)
+    return {"reinforced": reinforce_knowledge(repository)}
 
 
 @app.post("/api/images/upload")

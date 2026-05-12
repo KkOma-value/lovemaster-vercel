@@ -62,9 +62,9 @@ class RewriteService:
     def __init__(self, ai_client: AIClient | None = None) -> None:
         self.ai_client = ai_client or AIClient()
 
-    def optimize(self, user_message: str, image_url: str | None = None, mode: str = "love") -> dict:
+    async def optimize(self, user_message: str, image_url: str | None = None, mode: str = "love") -> dict:
         prompt = f"原始提问：{user_message}\n图片：{image_url or '无'}\n模式：{mode}\n请输出整理后的提问。"
-        text = self.ai_client.complete(system=REWRITE_SYSTEM, user=prompt, model=None)
+        text = await self.ai_client.complete(system=REWRITE_SYSTEM, user=prompt, model=None)
         return {"optimizedText": clean_rewrite(text, user_message)}
 
 
@@ -72,7 +72,7 @@ class OcrService:
     def __init__(self, ai_client: AIClient | None = None) -> None:
         self.ai_client = ai_client or AIClient()
 
-    def extract(self, image_url: str | None, user_message: str) -> dict:
+    async def extract(self, image_url: str | None, user_message: str) -> dict:
         """Extract OCR text from an image URL using a vision model.
 
         Returns dict with keys: ocrText, sceneSummary, uncertainties, visionFailed.
@@ -89,7 +89,7 @@ class OcrService:
             "2. SCENE_SUMMARY：简短描述截图的场景和对话氛围"
         )
 
-        vision_text = self.ai_client.complete_vision(
+        vision_text = await self.ai_client.complete_vision(
             system=OCR_SYSTEM,
             user=ocr_prompt,
             image_url=image_url,
@@ -116,14 +116,14 @@ class ProbabilityAnalysisService:
     def __init__(self, ai_client: AIClient | None = None) -> None:
         self.ai_client = ai_client or AIClient()
 
-    def analyze(self, user_message: str, rag_context: str = "", ocr_text: str = "") -> dict:
+    async def analyze(self, user_message: str, rag_context: str = "", ocr_text: str = "") -> dict:
         prompt = f"""
 用户问题：{user_message}
 OCR 摘录：{ocr_text or '无'}
 知识参考：{rag_context or '无'}
 请严格按照系统提示中的 JSON 格式输出概率分析。
 """
-        raw = self.ai_client.complete(system=PROBABILITY_SYSTEM, user=prompt, model=None)
+        raw = await self.ai_client.complete(system=PROBABILITY_SYSTEM, user=prompt, model=None)
         parsed = parse_json_object(raw)
         if parsed:
             try:

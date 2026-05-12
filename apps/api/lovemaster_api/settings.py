@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     app_knowledge_wiki_max_chars_per_page: int = 400
     app_knowledge_wiki_total_budget_chars: int = 2000
     app_knowledge_wiki_title_boost: float = 2.0
+    advisor_taboo_enabled: bool = True
+    advisor_rereading_enabled: bool = False  # doubles token cost
+    advisor_logging_enabled: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env.local",

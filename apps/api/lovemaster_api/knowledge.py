@@ -1,18 +1,47 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import math
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
+from .ai_client import get_client
 from .settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+class TTLCache:
+    """Thread-safe TTL cache with max size eviction."""
+
+    def __init__(self, maxsize: int = 128, ttl: int = 300) -> None:
+        self._cache: dict[str, tuple[str, float]] = {}
+        self._maxsize = maxsize
+        self._ttl = ttl
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> str | None:
+        with self._lock:
+            if key in self._cache:
+                value, ts = self._cache[key]
+                if time.time() - ts < self._ttl:
+                    return value
+                del self._cache[key]
+            return None
+
+    def set(self, key: str, value: str) -> None:
+        with self._lock:
+            if len(self._cache) >= self._maxsize:
+                oldest = min(self._cache, key=lambda k: self._cache[k][1])
+                del self._cache[oldest]
+            self._cache[key] = (value, time.time())
 
 
 SEGMENT_SEPARATOR = "\n---\n"
@@ -144,13 +173,13 @@ class DifyKnowledgeClient:
         self.max_retries = max_retries
         self.backoff_base = backoff_base
 
-    def retrieve(self, query: str) -> str:
+    async def retrieve(self, query: str) -> str:
         if not query.strip() or not settings.dify_dataset_key or not settings.dify_dataset_id:
             return ""
         last_exc: Exception | None = None
         for attempt in range(self.max_retries):
             try:
-                response = httpx.post(
+                response = await get_client().post(
                     f"{settings.dify_api_base_url.rstrip('/')}/datasets/{settings.dify_dataset_id}/retrieve",
                     headers={"Authorization": f"Bearer {settings.dify_dataset_key}", "Content-Type": "application/json"},
                     json={
@@ -171,7 +200,7 @@ class DifyKnowledgeClient:
                 if attempt < self.max_retries - 1:
                     sleep_time = self.backoff_base * (2 ** attempt)
                     logger.warning("Dify retrieve attempt %d failed: %s — retrying in %.1fs", attempt + 1, exc, sleep_time)
-                    time.sleep(sleep_time)
+                    await asyncio.sleep(sleep_time)
         logger.error("Dify retrieve failed after %d attempts: %s", self.max_retries, last_exc)
         return ""
 
@@ -194,20 +223,21 @@ class RagKnowledgeService:
     def __init__(self, wiki: WikiKnowledgeService | None = None, dify: DifyKnowledgeClient | None = None) -> None:
         self.wiki = wiki or WikiKnowledgeService()
         self.dify = dify if dify is not None else DifyKnowledgeClient()
-        self.cache: dict[str, str] = {}
+        self._cache = TTLCache(maxsize=128, ttl=300)
 
-    def retrieve(self, query: str) -> str:
+    async def retrieve(self, query: str) -> str:
         if not query.strip():
             return ""
         key = hashlib.sha256(query.strip().lower().encode("utf-8")).hexdigest()[:16]
-        if key in self.cache:
-            return self.cache[key]
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
 
-        wiki_result = self.wiki.retrieve(query)
+        wiki_result = await asyncio.to_thread(self.wiki.retrieve, query)
         dify_result = ""
         if self.dify is not None:
             try:
-                dify_result = self.dify.retrieve(query)
+                dify_result = await self.dify.retrieve(query)
             except Exception:
                 dify_result = ""
 
@@ -217,8 +247,9 @@ class RagKnowledgeService:
         if dify_result:
             parts.append(dify_result)
         result = SEGMENT_SEPARATOR.join(parts)
-        self.cache[key] = sanitize_knowledge(result)
-        return self.cache[key]
+        sanitized = sanitize_knowledge(result)
+        self._cache.set(key, sanitized)
+        return sanitized
 
 
 def split_title_and_body(path: Path, raw: str) -> tuple[str, str]:
@@ -259,9 +290,16 @@ def normalize_whitespace(text: str) -> str:
 def sanitize_knowledge(text: str) -> str:
     blocked_patterns = [
         r"(?i)ignore previous instructions",
+        r"(?i)ignore above",
         r"(?i)system prompt",
         r"(?i)developer message",
         r"(?i)泄露.*提示词",
+        r"(?i)disregard.*instructions",
+        r"(?i)new instructions",
+        r"(?i)override.*instructions",
+        r"(?i)forget.*instructions",
+        r"(?i)\bDAN\b.*mode",
+        r"(?i)jailbreak",
     ]
     sanitized = text
     for pattern in blocked_patterns:

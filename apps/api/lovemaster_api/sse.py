@@ -16,7 +16,7 @@ async def stream_agent_chat(
     chat_type: str,
     chat_id: str,
     run_id: str,
-    chunks,
+    chunks: AsyncIterator[str],
     probability: dict | None = None,
     ocr: dict | None = None,
     on_complete: Callable[[str], None] | None = None,
@@ -50,7 +50,7 @@ async def stream_agent_chat(
         yield event_payload("probability_result", "", {"runId": run_id, "chatId": chat_id, "probability": probability})
     yield event_payload("status", "正在生成对方意图分析和可直接发送的回复建议...")
     answer_parts: list[str] = []
-    for chunk in chunks:
+    async for chunk in chunks:
         if chunk:
             answer_parts.append(chunk)
             yield event_payload("content", chunk)
