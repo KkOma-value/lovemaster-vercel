@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 
 from .advisors import check_taboo, rereading_advisor
 from .ai_client import AIClient
-from .brain_agent import get_brain_agent
+from .brain_agent import BrainDecision, get_brain_agent
 from .knowledge import RagKnowledgeService
 from .multimodal import ocr_service, probability_service
 from .settings import settings
@@ -81,7 +81,7 @@ class AgentOrchestrator:
         if settings.advisor_rereading_enabled:
             user_prompt = rereading_advisor.transform(user_prompt)
 
-        chunks = await self.ai_client.stream(system=LOVE_SYSTEM_PROMPT, user=user_prompt)
+        chunks = self.ai_client.stream(system=LOVE_SYSTEM_PROMPT, user=user_prompt)
         return chunks, probability, ocr
 
     async def coach_answer(self, message: str, *, image_url: str | None = None, chat_id: str | None = None) -> str:
@@ -104,17 +104,19 @@ class AgentOrchestrator:
         *,
         image_url: str | None = None,
         chat_id: str | None = None,
-    ) -> tuple[AsyncIterator[str], dict]:
+    ) -> tuple[AsyncIterator[str], dict, list[dict]]:
         """Stream Coach mode response. Returns (chunks, ocr_result).
 
         When tools are likely needed, runs the tool-calling loop first
         and yields the final result as a single chunk.
         """
         # Advisor: taboo word check
+        progress_events: list[dict] = []
+
         if settings.advisor_taboo_enabled:
             taboo_reply = check_taboo(message)
             if taboo_reply:
-                return _single_chunk_iter(taboo_reply), {}
+                return _single_chunk_iter(taboo_reply), {}, progress_events
 
         history = await self._load_history(chat_id)
         ocr = await ocr_service.extract(image_url, message)
@@ -128,9 +130,16 @@ class AgentOrchestrator:
         # Use BrainAgent for AI-based tool decision (falls back to keyword matching)
         brain = get_brain_agent()
         decision = await brain.decide(message, user_prompt, rag)
+        if not decision.needs_tools and likely_needs_tools(message):
+            decision = BrainDecision(needs_tools=True, task_prompt=message)
 
         if decision.needs_tools:
             logger.info("BrainAgent decided tools needed: %s", decision.task_prompt[:100])
+            progress_events.append({
+                "type": "tool_call",
+                "content": "正在执行安全云端工具...",
+                "data": {"tool": "tool_router", "step": 1},
+            })
             result = await self.ai_client.complete_with_tools(
                 system=COACH_SYSTEM_PROMPT,
                 user=user_prompt,
@@ -140,10 +149,10 @@ class AgentOrchestrator:
             )
             # Synthesize tool results into final answer
             final = await brain.synthesize(message, user_prompt, rag, result)
-            return _single_chunk_iter(final), ocr
+            return _single_chunk_iter(final), ocr, progress_events
 
-        chunks = await self.ai_client.stream(system=COACH_SYSTEM_PROMPT, user=user_prompt)
-        return chunks, ocr
+        chunks = self.ai_client.stream(system=COACH_SYSTEM_PROMPT, user=user_prompt)
+        return chunks, ocr, progress_events
 
     async def _load_history(self, chat_id: str | None, limit: int = 10) -> list[dict]:
         if not chat_id or not self._repository:

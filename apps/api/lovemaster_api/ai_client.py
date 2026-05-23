@@ -247,6 +247,10 @@ class AIClient:
 
 class FakeAIClient:
     async def complete(self, *, system: str, user: str, model: str | None = None) -> str:
+        if "BrainAgent" in system:
+            if any(keyword in user for keyword in ["搜索", "搜", "查", "资料", "生成", "pdf", "文件", "邮件"]):
+                return "[TOOLS:YES]\n[TASK_PROMPT: 根据用户请求执行安全云端工具并整理结果]"
+            return "[TOOLS:NO]\n[DIRECT_ANSWER: 直接给出建议]"
         if "[TOOLS:YES]" in user:
             return "我会先把需要外部资料的部分拆出来，再给你一份可执行的沟通计划。"
         return "已结合上下文生成建议：" + summarize(user)

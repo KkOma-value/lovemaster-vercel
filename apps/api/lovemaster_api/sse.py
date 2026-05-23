@@ -19,6 +19,7 @@ async def stream_agent_chat(
     chunks: AsyncIterator[str],
     probability: dict | None = None,
     ocr: dict | None = None,
+    progress_events: list[dict] | None = None,
     on_complete: Callable[[str], None] | None = None,
 ) -> AsyncIterator[str]:
     yield event_payload(
@@ -46,6 +47,8 @@ async def stream_agent_chat(
             )
 
     yield event_payload("rag_status", "正在查阅恋爱知识库，补充参考资料...")
+    for event in progress_events or []:
+        yield event_payload(event.get("type", "status"), event.get("content", ""), event.get("data"))
     if probability:
         yield event_payload("probability_result", "", {"runId": run_id, "chatId": chat_id, "probability": probability})
     yield event_payload("status", "正在生成对方意图分析和可直接发送的回复建议...")

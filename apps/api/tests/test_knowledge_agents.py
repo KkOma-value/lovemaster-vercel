@@ -1,5 +1,6 @@
-from pathlib import Path
 import os
+import asyncio
+from pathlib import Path
 
 os.environ["AI_PROVIDER"] = "fake"
 
@@ -49,7 +50,7 @@ def test_rag_merges_wiki_first_then_dify(tmp_path: Path):
 
     rag = RagKnowledgeService(WikiKnowledgeService(wiki_root), StubDify())
 
-    result = rag.retrieve("怎么回复邀约")
+    result = asyncio.run(rag.retrieve("怎么回复邀约"))
 
     assert "回复节奏" in result
     assert "Dify 外部知识" in result
@@ -62,7 +63,7 @@ def test_agent_orchestrator_uses_rag_context_in_love_answer(tmp_path: Path):
     rag = RagKnowledgeService(WikiKnowledgeService(wiki_root), None)
     agent = AgentOrchestrator(ai_client=FakeAIClient(), rag_service=rag)
 
-    answer = agent.love_answer("我该怎么温和回应他")
+    answer = asyncio.run(agent.love_answer("我该怎么温和回应他"))
 
     assert "温和回应" in answer
     assert "我该怎么温和回应他" in answer
@@ -73,6 +74,6 @@ def test_agent_orchestrator_detects_tool_like_coach_requests(tmp_path: Path):
     agent = AgentOrchestrator(ai_client=FakeAIClient(), rag_service=rag)
 
     # Coach mode with tool-like request uses complete_with_tools (FakeAIClient returns default)
-    decision = agent.coach_answer("帮我搜索约会地点并整理一份计划")
+    decision = asyncio.run(agent.coach_answer("帮我搜索约会地点并整理一份计划"))
 
     assert "帮我搜索约会地点" in decision

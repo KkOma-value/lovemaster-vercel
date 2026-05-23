@@ -107,6 +107,14 @@ class InMemoryRepository:
         rows.sort(key=lambda row: row["updatedAt"], reverse=True)
         return [{"id": row["id"], "title": row["title"]} for row in rows]
 
+    def find_session(self, chat_id: str, user_id: str, chat_type: str | None = None) -> dict | None:
+        row = self.sessions.get(chat_id)
+        if not row or row["userId"] != user_id:
+            return None
+        if chat_type and row["chatType"] != chat_type:
+            return None
+        return row
+
     def delete_session(self, chat_id: str) -> None:
         self.sessions.pop(chat_id, None)
         self.messages.pop(chat_id, None)
@@ -224,10 +232,14 @@ class InMemoryRepository:
             "triggerType": payload.get("triggerType") or "manual",
             "triggerScore": float(payload.get("triggerScore") or 1.0),
             "status": payload.get("status") or "pending_review",
-            "stage": payload.get("stage"),
-            "intent": payload.get("intent"),
-            "problem": payload.get("problem"),
+            "stage": payload.get("stage") or "general",
+            "intent": payload.get("intent") or "general",
+            "problem": payload.get("problem") or "general",
+            "schemaVersion": payload.get("schemaVersion") or "v1",
             "createdAt": now_iso(),
+            "reviewerId": None,
+            "reviewNote": None,
+            "rejectedReason": None,
         }
         self.knowledge_candidates[candidate_id] = candidate
         return candidate
@@ -246,6 +258,8 @@ class InMemoryRepository:
         candidate["reviewerId"] = reviewer_id
         if note:
             candidate["reviewNote"] = note
+        if status == "rejected":
+            candidate["rejectedReason"] = note
         candidate["reviewedAt"] = now_iso()
         return candidate
 
@@ -307,12 +321,11 @@ class InMemoryRepository:
         ]
 
 
-class PostgresRepository(InMemoryRepository):
+class PostgresRepository:
     _conn = None  # module-level connection singleton for serverless
 
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
-        self._ensure_schema()
 
     def _connect(self):
         import psycopg
@@ -321,7 +334,7 @@ class PostgresRepository(InMemoryRepository):
             PostgresRepository._conn = psycopg.connect(self.database_url)
         return PostgresRepository._conn
 
-    def _ensure_schema(self) -> None:
+    def run_migrations(self) -> None:
         migration_path = Path(__file__).resolve().parents[1] / "migrations" / "001_initial_schema.sql"
         sql = migration_path.read_text(encoding="utf-8")
         with self._connect() as conn:
@@ -435,6 +448,21 @@ class PostgresRepository(InMemoryRepository):
                 (user_id, chat_type),
             ).fetchall()
         return [{"id": row[0], "title": row[1]} for row in rows]
+
+    def find_session(self, chat_id: str, user_id: str, chat_type: str | None = None) -> dict | None:
+        where_chat_type = "and chat_type = %s" if chat_type else ""
+        params = (chat_id, user_id, chat_type) if chat_type else (chat_id, user_id)
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                select id, user_id, chat_type, title from conversations
+                where id = %s and user_id = %s {where_chat_type}
+                """,
+                params,
+            ).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "userId": row[1], "chatType": row[2], "title": row[3]}
 
     def delete_session(self, chat_id: str) -> None:
         with self._connect() as conn:
@@ -615,7 +643,7 @@ class PostgresRepository(InMemoryRepository):
         values = (
             candidate_id,
             user_id,
-            payload.get("chatId"),
+            payload.get("chatId") or "",
             payload.get("runId"),
             payload.get("question") or "",
             payload.get("answer") or "",
@@ -623,17 +651,18 @@ class PostgresRepository(InMemoryRepository):
             payload.get("triggerType") or "manual",
             float(payload.get("triggerScore") or 1.0),
             payload.get("status") or "pending_review",
-            payload.get("stage"),
-            payload.get("intent"),
-            payload.get("problem"),
+            payload.get("stage") or "general",
+            payload.get("intent") or "general",
+            payload.get("problem") or "general",
+            payload.get("schemaVersion") or "v1",
         )
         with self._connect() as conn:
             conn.execute(
                 """
-                insert into wiki_candidates
+                insert into wiki_candidate
                   (id, user_id, source_chat_id, source_run_id, raw_question, raw_answer, abstract_summary,
-                   trigger_type, trigger_score, status, stage, intent, problem)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   trigger_type, trigger_score, status, stage, intent, problem, schema_version)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 values,
             )
@@ -645,8 +674,8 @@ class PostgresRepository(InMemoryRepository):
             rows = conn.execute(
                 """
                 select id, stage, intent, problem, abstract_summary, trigger_type, trigger_score,
-                       status, created_at, raw_question, raw_answer, reviewer_id, review_note
-                from wiki_candidates
+                       status, created_at, raw_question, raw_answer, reviewer_id, rejected_reason
+                from wiki_candidate
                 where status = %s
                 order by created_at desc
                 limit %s offset %s
@@ -659,13 +688,16 @@ class PostgresRepository(InMemoryRepository):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                update wiki_candidates
-                set status = %s, reviewer_id = %s, review_note = %s, reviewed_at = now()
+                update wiki_candidate
+                set status = %s,
+                    reviewer_id = %s,
+                    rejected_reason = case when %s = 'rejected' then %s else rejected_reason end,
+                    updated_at = now()
                 where id = %s
                 returning id, stage, intent, problem, abstract_summary, trigger_type, trigger_score,
-                          status, created_at, raw_question, raw_answer, reviewer_id, review_note
+                          status, created_at, raw_question, raw_answer, reviewer_id, rejected_reason
                 """,
-                (status, reviewer_id, note, candidate_id),
+                (status, reviewer_id, status, note, candidate_id),
             ).fetchone()
         return self._candidate_from_row(row)
 
@@ -674,15 +706,15 @@ class PostgresRepository(InMemoryRepository):
         with self._connect() as conn:
             conn.execute(
                 """
-                insert into wiki_feedback_events
-                  (id, user_id, candidate_id, chat_id, run_id, event_type, event_value, event_score, meta)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                insert into wiki_feedback_event
+                  (id, user_id, candidate_id, source_chat_id, source_run_id, event_type, event_value, event_score, meta_json)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     event_id,
                     user_id,
                     payload.get("candidateId"),
-                    payload.get("chatId"),
+                    payload.get("chatId") or "",
                     payload.get("runId"),
                     payload.get("eventType"),
                     payload.get("eventValue"),
@@ -700,7 +732,7 @@ class PostgresRepository(InMemoryRepository):
                 f"""
                 select id, topic_key, strategy_id, sample_count, positive_rate, continue_rate,
                        confidence, rank_score, gray_enabled, computed_at
-                from wiki_strategy_scores
+                from wiki_strategy_score
                 {where}
                 order by rank_score desc
                 limit %s

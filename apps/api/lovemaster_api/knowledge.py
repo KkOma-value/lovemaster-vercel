@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import math
 import re
@@ -237,7 +238,8 @@ class RagKnowledgeService:
         dify_result = ""
         if self.dify is not None:
             try:
-                dify_result = await self.dify.retrieve(query)
+                maybe_result = self.dify.retrieve(query)
+                dify_result = await maybe_result if inspect.isawaitable(maybe_result) else maybe_result
             except Exception:
                 dify_result = ""
 

@@ -90,57 +90,70 @@ create table if not exists chat_run_events (
 create index if not exists idx_chat_run_events_run_created
   on chat_run_events(run_id, created_at asc);
 
-create table if not exists wiki_candidates (
+create table if not exists wiki_candidate (
   id varchar(36) primary key,
-  user_id varchar(36),
-  source_chat_id varchar(36),
-  source_run_id varchar(36),
+  source_chat_id varchar(64) not null,
+  source_run_id varchar(64),
+  user_id varchar(36) not null,
+  trigger_type varchar(32) not null,
+  trigger_score numeric(4, 3),
   raw_question text,
-  raw_answer text,
+  raw_answer text not null,
+  stage varchar(32) not null,
+  intent varchar(32) not null,
+  problem varchar(32) not null,
+  schema_version varchar(16) not null,
   abstract_summary text,
-  trigger_type varchar(50),
-  trigger_score double precision not null default 1.0,
-  status varchar(30) not null default 'pending_review',
-  stage varchar(100),
-  intent varchar(100),
-  problem varchar(255),
+  status varchar(20) not null default 'pending_review',
   reviewer_id varchar(36),
-  review_note text,
-  reviewed_at timestamptz,
-  created_at timestamptz not null default now()
+  rejected_reason text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
-create index if not exists idx_wiki_candidates_status_created
-  on wiki_candidates(status, created_at desc);
+create index if not exists idx_wiki_candidate_user_created
+  on wiki_candidate(user_id, created_at desc);
 
-create table if not exists wiki_feedback_events (
+create index if not exists idx_wiki_candidate_status_created
+  on wiki_candidate(status, created_at desc);
+
+create index if not exists idx_wiki_candidate_topic
+  on wiki_candidate(stage, intent, problem);
+
+create table if not exists wiki_feedback_event (
   id varchar(36) primary key,
-  user_id varchar(36),
   candidate_id varchar(36),
-  chat_id varchar(36),
-  run_id varchar(36),
-  event_type varchar(50),
-  event_value text,
-  event_score double precision not null default 1.0,
-  meta jsonb,
-  created_at timestamptz not null default now()
+  source_chat_id varchar(64) not null,
+  source_run_id varchar(64),
+  user_id varchar(36) not null,
+  event_type varchar(32) not null,
+  event_value varchar(64),
+  event_score numeric(4, 3),
+  meta_json text,
+  created_at timestamptz not null default now(),
+  processed boolean not null default false,
+  processed_at timestamptz
 );
 
-create index if not exists idx_wiki_feedback_events_candidate
-  on wiki_feedback_events(candidate_id);
+create index if not exists idx_wiki_feedback_candidate_created
+  on wiki_feedback_event(candidate_id, created_at desc);
 
-create table if not exists wiki_strategy_scores (
+create index if not exists idx_wiki_feedback_user_created
+  on wiki_feedback_event(user_id, created_at desc);
+
+create table if not exists wiki_strategy_score (
   id varchar(36) primary key,
-  topic_key varchar(255),
-  strategy_id varchar(255),
+  topic_key varchar(96) not null,
+  strategy_id varchar(64) not null,
   sample_count integer not null default 0,
-  positive_rate double precision not null default 0,
-  continue_rate double precision not null default 0,
-  confidence double precision not null default 0,
-  rank_score double precision not null default 0,
+  positive_rate numeric(5, 4),
+  continue_rate numeric(5, 4),
+  confidence numeric(5, 4),
+  rank_score numeric(6, 4),
   gray_enabled boolean not null default false,
-  computed_at timestamptz not null default now()
+  computed_at timestamptz not null default now(),
+  unique (topic_key, strategy_id)
 );
 
-create index if not exists idx_wiki_strategy_scores_topic_rank
-  on wiki_strategy_scores(topic_key, rank_score desc);
+create index if not exists idx_wss_topic_rank
+  on wiki_strategy_score(topic_key, rank_score desc);
