@@ -19,6 +19,29 @@ def _keepalive_line() -> str:
     return ": keepalive\n\n"
 
 
+async def _timed_chunk_reader(
+    chunks: AsyncIterator[str],
+    timeout: float,
+) -> AsyncIterator[str | None]:
+    """Wrap an async iterator to yield keepalive sentinels when the upstream is silent.
+
+    Yields each chunk from the upstream, or None when the upstream has been
+    silent for ``timeout`` seconds. The caller can emit keepalive on None.
+    """
+    async def _next(itr: AsyncIterator[str]) -> tuple[bool, str]:
+        try:
+            return True, await itr.__anext__()
+        except StopAsyncIteration:
+            return False, ""
+
+    itr = chunks.__aiter__()
+    while True:
+        done, chunk = await asyncio.wait_for(_next(itr), timeout=timeout)
+        if not done:
+            return
+        yield chunk
+
+
 async def stream_agent_chat(
     *,
     chat_type: str,
@@ -62,23 +85,20 @@ async def stream_agent_chat(
     yield event_payload("status", "正在生成对方意图分析和可直接发送的回复建议...")
 
     answer_parts: list[str] = []
-    last_keepalive = time.monotonic()
 
-    async for chunk in chunks:
-        if chunk:
+    async for chunk in _timed_chunk_reader(chunks, KEEPALIVE_INTERVAL):
+        if chunk is not None:
             answer_parts.append(chunk)
             yield event_payload("content", chunk)
-            last_keepalive = time.monotonic()
         else:
-            # Empty chunk — check if we should send a keepalive
-            now = time.monotonic()
-            if now - last_keepalive >= KEEPALIVE_INTERVAL:
-                yield _keepalive_line()
-                last_keepalive = now
+            yield _keepalive_line()
 
-    # Safety: if no chunks were received at all, ensure the stream isn't silent
     if not answer_parts:
-        last_keepalive = time.monotonic()
+        yield event_payload(
+            "error",
+            "AI 服务未返回内容，请稍后重试",
+            {"runId": run_id, "chatId": chat_id},
+        )
 
     full_answer = "".join(answer_parts)
     if on_complete:

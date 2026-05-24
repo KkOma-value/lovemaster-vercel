@@ -66,16 +66,19 @@ class AgentOrchestrator:
                 return _single_chunk_iter(taboo_reply), None, {}
 
         # Parallel: history + OCR (independent of each other)
-        history, ocr = await asyncio.gather(
+        gather_results = await asyncio.gather(
             self._load_history(chat_id),
             ocr_service.extract(image_url, message),
+            return_exceptions=True,
         )
+        history = gather_results[0] if not isinstance(gather_results[0], Exception) else []
+        if isinstance(gather_results[0], Exception):
+            logger.warning("Failed to load history for love_stream: %s", gather_results[0])
+        ocr = gather_results[1] if not isinstance(gather_results[1], Exception) else {}
+        if isinstance(gather_results[1], Exception):
+            logger.warning("OCR failed in love_stream: %s", gather_results[1])
 
-        # RAG depends on OCR result for query building
-        rag_coro = self.rag_service.retrieve(build_rag_query(message, ocr))
-
-        # Probability depends on RAG, so we chain after RAG
-        rag = await rag_coro
+        rag = await self.rag_service.retrieve(build_rag_query(message, ocr or None))
         probability = None
         if probability_requested(message):
             probability = await probability_service.analyze(
@@ -114,8 +117,8 @@ class AgentOrchestrator:
     ) -> tuple[AsyncIterator[str], dict, list[dict]]:
         """Stream Coach mode response. Returns (chunks, ocr_result).
 
-        History, OCR run in parallel. BrainAgent.decide runs in parallel with RAG
-        since it only needs the user message. This minimizes first-token latency.
+        History and OCR run in parallel. RAG then brain.decide run sequentially
+        so the brain receives full context (user_prompt + rag) for accurate decisions.
         """
         # Advisor: taboo word check
         progress_events: list[dict] = []
@@ -126,18 +129,24 @@ class AgentOrchestrator:
                 return _single_chunk_iter(taboo_reply), {}, progress_events
 
         # Parallel: history + OCR
-        history, ocr = await asyncio.gather(
+        gather_results = await asyncio.gather(
             self._load_history(chat_id),
             ocr_service.extract(image_url, message),
+            return_exceptions=True,
         )
+        history = gather_results[0] if not isinstance(gather_results[0], Exception) else []
+        if isinstance(gather_results[0], Exception):
+            logger.warning("Failed to load history for coach_stream: %s", gather_results[0])
+        ocr = gather_results[1] if not isinstance(gather_results[1], Exception) else {}
+        if isinstance(gather_results[1], Exception):
+            logger.warning("OCR failed in coach_stream: %s", gather_results[1])
 
-        # Parallel: RAG + BrainAgent.decide (brain only needs the message, not RAG)
-        brain = get_brain_agent()
-        rag_coro = self.rag_service.retrieve(build_rag_query(message, ocr))
-        decision_coro = brain.decide(message, message, "")
-        rag, decision = await asyncio.gather(rag_coro, decision_coro)
-
+        rag = await self.rag_service.retrieve(build_rag_query(message, ocr or None))
         user_prompt = build_coach_prompt(message, rag, image_url, ocr, history)
+
+        # BrainAgent decides with full context (user_prompt + rag)
+        brain = get_brain_agent()
+        decision = await brain.decide(message, user_prompt, rag)
 
         # Advisor: ReReading (Re2) transform
         if settings.advisor_rereading_enabled:
