@@ -1,5 +1,9 @@
+import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Callable
+
+KEEPALIVE_INTERVAL = 5.0
 
 
 def event_payload(event_type: str, content: str = "", data: dict | None = None) -> str:
@@ -9,6 +13,10 @@ def event_payload(event_type: str, content: str = "", data: dict | None = None) 
         "data": data or None,
     }
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _keepalive_line() -> str:
+    return ": keepalive\n\n"
 
 
 async def stream_agent_chat(
@@ -52,11 +60,26 @@ async def stream_agent_chat(
     if probability:
         yield event_payload("probability_result", "", {"runId": run_id, "chatId": chat_id, "probability": probability})
     yield event_payload("status", "正在生成对方意图分析和可直接发送的回复建议...")
+
     answer_parts: list[str] = []
+    last_keepalive = time.monotonic()
+
     async for chunk in chunks:
         if chunk:
             answer_parts.append(chunk)
             yield event_payload("content", chunk)
+            last_keepalive = time.monotonic()
+        else:
+            # Empty chunk — check if we should send a keepalive
+            now = time.monotonic()
+            if now - last_keepalive >= KEEPALIVE_INTERVAL:
+                yield _keepalive_line()
+                last_keepalive = now
+
+    # Safety: if no chunks were received at all, ensure the stream isn't silent
+    if not answer_parts:
+        last_keepalive = time.monotonic()
+
     full_answer = "".join(answer_parts)
     if on_complete:
         on_complete(full_answer)

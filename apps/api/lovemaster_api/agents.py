@@ -56,8 +56,8 @@ class AgentOrchestrator:
     ) -> tuple[AsyncIterator[str], dict | None, dict]:
         """Stream Love mode response. Returns (chunks, probability, ocr_result).
 
-        OCR and RAG are computed once and shared. Probability is computed inline
-        only when the user requests it.
+        OCR, RAG, and history are computed in parallel to minimize first-token latency.
+        Probability is computed inline only when the user requests it.
         """
         # Advisor: taboo word check
         if settings.advisor_taboo_enabled:
@@ -65,10 +65,17 @@ class AgentOrchestrator:
             if taboo_reply:
                 return _single_chunk_iter(taboo_reply), None, {}
 
-        history = await self._load_history(chat_id)
-        ocr = await ocr_service.extract(image_url, message)
-        rag = await self.rag_service.retrieve(build_rag_query(message, ocr))
+        # Parallel: history + OCR (independent of each other)
+        history, ocr = await asyncio.gather(
+            self._load_history(chat_id),
+            ocr_service.extract(image_url, message),
+        )
 
+        # RAG depends on OCR result for query building
+        rag_coro = self.rag_service.retrieve(build_rag_query(message, ocr))
+
+        # Probability depends on RAG, so we chain after RAG
+        rag = await rag_coro
         probability = None
         if probability_requested(message):
             probability = await probability_service.analyze(
@@ -107,8 +114,8 @@ class AgentOrchestrator:
     ) -> tuple[AsyncIterator[str], dict, list[dict]]:
         """Stream Coach mode response. Returns (chunks, ocr_result).
 
-        When tools are likely needed, runs the tool-calling loop first
-        and yields the final result as a single chunk.
+        History, OCR run in parallel. BrainAgent.decide runs in parallel with RAG
+        since it only needs the user message. This minimizes first-token latency.
         """
         # Advisor: taboo word check
         progress_events: list[dict] = []
@@ -118,18 +125,24 @@ class AgentOrchestrator:
             if taboo_reply:
                 return _single_chunk_iter(taboo_reply), {}, progress_events
 
-        history = await self._load_history(chat_id)
-        ocr = await ocr_service.extract(image_url, message)
-        rag = await self.rag_service.retrieve(build_rag_query(message, ocr))
+        # Parallel: history + OCR
+        history, ocr = await asyncio.gather(
+            self._load_history(chat_id),
+            ocr_service.extract(image_url, message),
+        )
+
+        # Parallel: RAG + BrainAgent.decide (brain only needs the message, not RAG)
+        brain = get_brain_agent()
+        rag_coro = self.rag_service.retrieve(build_rag_query(message, ocr))
+        decision_coro = brain.decide(message, message, "")
+        rag, decision = await asyncio.gather(rag_coro, decision_coro)
+
         user_prompt = build_coach_prompt(message, rag, image_url, ocr, history)
 
         # Advisor: ReReading (Re2) transform
         if settings.advisor_rereading_enabled:
             user_prompt = rereading_advisor.transform(user_prompt)
 
-        # Use BrainAgent for AI-based tool decision (falls back to keyword matching)
-        brain = get_brain_agent()
-        decision = await brain.decide(message, user_prompt, rag)
         if not decision.needs_tools and likely_needs_tools(message):
             decision = BrainDecision(needs_tools=True, task_prompt=message)
 

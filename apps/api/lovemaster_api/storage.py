@@ -3,9 +3,9 @@ from __future__ import annotations
 import re
 from uuid import uuid4
 
-import httpx
 from fastapi import UploadFile
 
+from .ai_client import get_client
 from .settings import settings
 
 
@@ -37,7 +37,7 @@ async def upload_to_supabase(file: UploadFile, user_id: str, image_type: str) ->
         f"{settings.supabase_url.rstrip('/')}/storage/v1/object/"
         f"{settings.supabase_storage_bucket}/{storage_path}"
     )
-    response = httpx.post(
+    response = await get_client().post(
         upload_url,
         content=content,
         headers={

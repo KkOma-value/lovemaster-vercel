@@ -75,6 +75,7 @@ class WikiKnowledgeService:
         total_budget_chars: int = 2000,
         expansion_weight: float = 0.5,
         max_expansion_hops: int = 1,
+        page_cache_ttl: float = 60.0,
     ) -> None:
         self.root = Path(root or settings.app_knowledge_wiki_root)
         if not self.root.is_absolute():
@@ -85,12 +86,15 @@ class WikiKnowledgeService:
         self.total_budget_chars = total_budget_chars
         self.expansion_weight = expansion_weight
         self.max_expansion_hops = max_expansion_hops
+        self._page_cache: dict[str, dict] | None = None
+        self._page_cache_ts: float = 0.0
+        self._page_cache_ttl = page_cache_ttl
 
     def retrieve(self, query: str) -> WikiKnowledgeResult:
         if not query or not query.strip() or not self.root.exists():
             return WikiKnowledgeResult.empty()
 
-        pages = self._load_pages()
+        pages = self._get_pages()
         if not pages:
             return WikiKnowledgeResult.empty()
 
@@ -149,6 +153,16 @@ class WikiKnowledgeService:
                 if boost > 0.1:
                     scores[linked_id] = boost
                     self._expand_links(linked_id, boost, link_graph, scores, hop + 1)
+
+    def _get_pages(self) -> dict[str, dict]:
+        """Return cached page index if fresh, otherwise reload."""
+        now = time.monotonic()
+        if self._page_cache is not None and (now - self._page_cache_ts) < self._page_cache_ttl:
+            return self._page_cache
+        pages = self._load_pages()
+        self._page_cache = pages
+        self._page_cache_ts = now
+        return pages
 
     def _load_pages(self) -> dict[str, dict]:
         pages = {}
